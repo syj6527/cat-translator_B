@@ -1,15 +1,19 @@
 // ============================================================
-// 🐱 Cat Translator v18.0.0 - utils.js
+// 🐱 Cat Translator v18.1.0 - utils.js
 // 유틸리티: 알림, 정규식 세탁기, HTML/CSS 방어, 언어 감지
 // ============================================================
 
-// ─── 테마 이모지 헬퍼 ──────────────────────────────────
 export function getThemeEmoji() {
     const theme = document.body.getAttribute('data-cat-theme');
     return theme === 'tiger' ? '🐯' : '🐱';
 }
 
-// ─── 3색 스마트 토스트 알림 (알약 디자인) ──────────────
+// 번역 완료 보상 이모지 🐟/🍖
+export function getCompletionEmoji() {
+    const theme = document.body.getAttribute('data-cat-theme');
+    return theme === 'tiger' ? '🍖' : '🐟';
+}
+
 export function catNotify(message, type = 'success') {
     $('.cat-notification').remove();
     const emoji = getThemeEmoji();
@@ -34,7 +38,6 @@ export function catNotify(message, type = 'success') {
     return notifyHtml;
 }
 
-// ─── 진행률 토스트 (클릭시 중단) ─────────────────────
 export function catNotifyProgress(message, onAbort) {
     const el = catNotify(message, 'progress');
     if (onAbort) {
@@ -48,27 +51,38 @@ export function catNotifyProgress(message, onAbort) {
     return el;
 }
 
-// ─── 정규식 세탁기 (cleanResult 강화) ──────────────────
+// 🚨 마스터 요청: 엔터(줄바꿈) 증발 방지 및 HTML/마크다운 완전 복구!
 export function cleanResult(text) {
     if (!text) return "";
-    return text
-        .replace(/^(번역|Translation|Output|Input|Result):\s*/gi, "")
-        .replace(/```[\s\S]*?```/g, "")
-        .replace(/`([^`]+)`/g, "$1")
-        .replace(/\s{2,}/g, " ")
+    
+    let cleaned = text.replace(/^(번역|Translation|Output|Input|Result):\s*/gi, "");
+    
+    // AI가 답변 전체를 코드블록(```)으로 감싸서 보내는 경우 겉 껍데기만 제거
+    const wholeCodeBlockMatch = cleaned.match(/^```[a-z]*\n([\s\S]*?)\n```$/i);
+    if (wholeCodeBlockMatch) {
+        cleaned = wholeCodeBlockMatch[1];
+    }
+
+    // 🚨 핵심 수정 부분: AI가 제멋대로 바꾼(&lt; &gt; \) 특수기호 강제 원상복구
+    cleaned = cleaned.replace(/&lt;/g, "<")
+                     .replace(/&gt;/g, ">")
+                     .replace(/\\`/g, "`")
+                     .replace(/\\</g, "<")
+                     .replace(/\\>/g, ">");
+
+    return cleaned
+        .replace(/[^\S\r\n]{2,}/g, " ") // 스페이스랑 탭만 줄이고 줄바꿈(\r\n)은 절대 안 건드림!
         .trim();
 }
 
-// ─── 모델 테마 판별 (프리셋 이름도 감지) ──────────────
 export function getModelTheme(modelName) {
-    if (!modelName || typeof modelName !== 'string') return 'cat';
+    if (!modelName) return 'cat';
     const lower = modelName.toLowerCase();
     if (lower.includes('pro') || lower.includes('프로')) return 'tiger';
     if (lower.includes('flash') || lower.includes('플래') || lower.includes('플레')) return 'cat';
     return 'cat';
 }
 
-// ─── 언어 감지 (70% 룰) ─────────────────────────────
 export function detectLanguageDirection(text, settings) {
     const korCount = (text.match(/[가-힣]/g) || []).length;
     const engCount = (text.match(/[a-zA-Z]/g) || []).length;
@@ -81,7 +95,6 @@ export function detectLanguageDirection(text, settings) {
     const korRatio = korCount / total;
     const engRatio = engCount / total;
 
-    // 한↔영 스마트 감지 (목표 언어 무관)
     if (korRatio >= 0.7) {
         return { isToEnglish: true, targetLang: 'English' };
     }
@@ -89,11 +102,9 @@ export function detectLanguageDirection(text, settings) {
         return { isToEnglish: false, targetLang: 'Korean' };
     }
 
-    // 70% 미만이면 설정된 목표 언어로
     return { isToEnglish: false, targetLang: settings.targetLang };
 }
 
-// ─── 사전 치환 (Pre-swap) + 매칭 카운트 ─────────────────
 export function applyPreReplace(text, dictionary, isToEnglish) {
     return applyPreReplaceWithCount(text, dictionary, isToEnglish).swapped;
 }
@@ -128,13 +139,11 @@ export function applyPreReplaceWithCount(text, dictionary, isToEnglish) {
     return { swapped: result, matchCount };
 }
 
-// ─── 텍스트 정규화 (캐시 키 생성용) ───────────────────
 export function normalizeText(text) {
     if (!text) return "";
     return text.toLowerCase().replace(/[^a-z가-힣0-9\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/g, '').trim();
 }
 
-// ─── 네이티브 textarea 값 설정 ────────────────────────
 export function setTextareaValue(el, value) {
     const nativeSetter = Object.getOwnPropertyDescriptor(
         window.HTMLTextAreaElement.prototype, "value"
