@@ -1,7 +1,7 @@
 // ============================================================
 // 🐱 Translator v1.0.4 - ui.js
 // ============================================================
-import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue } from './utils.js';
+import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, stripMetaForDetection } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin } from './cache.js';
 import { fetchTranslation, gatherContextMessages, SYSTEM_SHIELD, STYLE_PRESETS, getLastDebugLog } from './translator.js';
 
@@ -521,7 +521,7 @@ export function injectInputButtons(settings, stContext, processMessageFn) {
                 sendArea.removeData('cat-original-text').removeData('cat-last-translated').removeData('cat-last-target-lang');
             }
             
-            const textToTranslate = isRetry ? originalText : currentText; const forceLang = null; const prevTrans = isRetry ? currentText : null;
+            const textToTranslate = isRetry ? originalText : currentText; let forceLang = null; const prevTrans = isRetry ? currentText : null;
             
             // 🚨 덮어쓰기 전 무조건 히스토리 백업 (어떤 경우에도 인풋 복구 가능)
             pushInputHistory(currentText);
@@ -532,6 +532,17 @@ export function injectInputButtons(settings, stContext, processMessageFn) {
             const contextMsgs = gatherContextMessages(lastMsgId + 1, stContext, contextRange);
             const bilingualInputLangMap = { 'ko-en': 'English', 'ko-ja': 'Japanese', 'ko-zh': 'Chinese' };
             const inputTargetLang = (settings.dialogueBilingual && settings.dialogueBilingual !== 'off') ? (bilingualInputLangMap[settings.dialogueBilingual] || settings.targetLang) : settings.targetLang;
+            
+            // 🚨 인풋 방향 안전장치: 양방향+병기 둘 다 꺼진 환경에서
+            // 한국어 인풋이 Korean 타겟으로 가는 것 방지 (한→한 무의미 번역 → AI가 영어 취급하는 혼란)
+            const dirCheck = stripMetaForDetection(textToTranslate);
+            const dcKor = (dirCheck.match(/[가-힣]/g) || []).length;
+            const dcEng = (dirCheck.match(/[a-zA-Z]/g) || []).length;
+            if (dcKor > dcEng && inputTargetLang === 'Korean') {
+                forceLang = 'English';
+                console.log(`[CAT] 🧭 인풋 방향 교정: 한국어 인풋(한${dcKor}/영${dcEng})인데 타겟이 Korean → English로 강제`);
+            }
+            
             const inputSettings = { ...settings, dialogueBilingual: 'off', targetLang: inputTargetLang };
             const result = await fetchTranslation(textToTranslate, inputSettings, stContext, { forceLang, prevTranslation: prevTrans, contextMessages: contextMsgs });
             if (result && result.text && result.text !== currentText) {
