@@ -45,6 +45,13 @@ NEVER write phrases like:
 Your reasoning belongs in the thinking field (if available), NEVER in the response body.
 Output starts IMMEDIATELY with the translated text. No preamble. No introduction. No conclusion.
 
+[NO CITATION / REFERENCE MARKERS - CRITICAL]
+NEVER append citation-style markers like [1], [3], [5] to sentences in your output.
+Context messages are labeled "Message -5" etc. — those numbers are labels for YOUR reference only. NEVER cite them.
+If a bracketed number like [5] does not exist in the source text, it must NOT exist in your output.
+WRONG: "시저는 눈 하나 깜짝하지 않았다 [5]." ← FAILURE
+CORRECT: "시저는 눈 하나 깜짝하지 않았다."
+
 [FULL TRANSLATION MANDATORY]
 Translate EVERY SINGLE SENTENCE in the source text.
 Do NOT skip sentences just because they don't contain glossary terms.
@@ -196,11 +203,16 @@ For structured panels (HTML wrappers + yaml/json blocks):
 - KEYS keep their original language (English keys stay English, Korean stay Korean)
 - VALUES translate to target language
 - NEVER merge/skip yaml lines
+- Text INSIDE \`\`\` fences is STORY DATA, not program code. Translating the readable text inside is MANDATORY.
+- Copying a fenced block unchanged in its source language is a FAILURE. Only structure (fences, keys, indentation) stays — prose and values MUST be translated.
 
 [OUTPUT LANGUAGE PURITY - ABSOLUTE]
 Output must be EXCLUSIVELY in target language. NO mixing.
 - To Korean: translate ALL English words (transliterate unknown proper nouns: Jenkins→젠킨스). Never leave "however/actually/well/anyway" untranslated. English only allowed inside code/HTML or glossary right-side.
 - To English: PURE English, NO Korean characters. Romanize Korean names (민수→Minsu, 서울→Seoul). Never leave "시저/그러나/그리고" in English output.
+- Word-by-word mixing is a FAILURE. Every pronoun, every verb, every word inside dialogue must be translated.
+WRONG: He 말했다. "Drink, 어서 빨리." ← mixed = FAILURE
+CORRECT: 그가 말했다. "마셔, 어서 빨리."
 
 [GLOSSARY - STRICT DIRECTION]
 Format "X=Y": X appears in SOURCE, Y must appear in OUTPUT.
@@ -619,6 +631,16 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
 
         let cleaned = cleanResult(result, text);
         
+        // 🚨 각주형 [숫자] 오염 제거: 원문에 [숫자]가 전혀 없는데 번역에 [5] 같은 인용 마커가 붙는 경우
+        // (컨텍스트 메시지 라벨 "Message -5"를 모델이 출처처럼 인용하는 오염)
+        if (cleaned && !/\[\d{1,2}\]/.test(text)) {
+            const citeStripped = cleaned.replace(/\s*\[\d{1,2}\](?=[\s.,!?"'”’)\]]|$)/gm, '');
+            if (citeStripped !== cleaned) {
+                console.log('[CAT] 🧹 각주형 [숫자] 오염 자동 제거');
+                cleaned = citeStripped;
+            }
+        }
+        
         // 🚨 병기 후처리: "text."[번역] → "text. [번역]" 자동 교정
         const bilingualMode = settings.dialogueBilingual || 'off';
         if (bilingualMode !== 'off' && cleaned) {
@@ -707,6 +729,21 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 if (englishWords > 5) {
                     console.warn(`[CAT] ⚠️ 영단어 ${englishWords}개 섞임 (번역 누락 가능)`);
                     catNotify(`${getThemeEmoji()} 영단어 ${englishWords}개가 번역 안 됨. 사전 등록 권장`, "warning");
+                }
+            }
+            
+            // 🚨 코드펜스(인포블럭) 내부 미번역 감지: 펜스 안이 영어 그대로 남은 경우
+            const fenceBlocks = [...cleaned.matchAll(/```[a-zA-Z]*\n?([\s\S]*?)```/g)];
+            for (const fb of fenceBlocks) {
+                const inner = fb[1] || '';
+                if (inner.length < 40) continue;
+                const innerKor = (inner.match(/[가-힣]/g) || []).length;
+                const innerEng = (inner.match(/[a-zA-Z]/g) || []).length;
+                // 영문 위주인데 한글이 거의 없음 = 인포블럭 통째로 미번역
+                if (innerEng > 30 && innerKor / Math.max(1, innerKor + innerEng) < 0.05) {
+                    console.warn(`[CAT] ⚠️ 인포블럭(코드펜스) 내부 미번역 감지 (한글 ${innerKor}자 / 영문 ${innerEng}자)`);
+                    catNotify(`${getThemeEmoji()} 인포블럭 내부가 번역 안 됐어요. 재번역을 권장해요`, "warning");
+                    break;
                 }
             }
         }
