@@ -530,16 +530,32 @@ export function splitLiteralAppendix(text) {
 }
 
 // 직역 텍스트 → 접이식 <details> HTML (ST 네이티브 렌더, 탭 이벤트 JS 불필요)
-// originalText 전달 시 원문도 함께 표시 (토큰 0 — 이미 보유한 데이터 재활용)
+// 직역 파트가 "» 원문 / 직역" 교차 짝 형식이면 줄 단위 스타일링으로 번갈아 표시
+// 형식이 아니면(모델이 무시) originalText로 기존 2블럭(원문 통짜+직역 통짜) 폴백
 export function buildLiteralDetailsHtml(literalText, originalText = null) {
-    const escape = (s) => String(s)
+    const escapeHtml = (s) => String(s)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
-    const litHtml = escape(literalText);
+        .replace(/>/g, '&gt;');
+    const lines = String(literalText).split('\n');
+    const hasPairs = lines.some(l => /^»\s?/.test(l.trim()));
+    
+    if (hasPairs) {
+        // 교차 짝 렌더: » 줄 = 원문 스타일, 나머지 = 직역, 빈 줄 = 짝 간격
+        const body = lines.map(line => {
+            const t = line.trim();
+            if (!t) return '<div class="cat-literal-gap"></div>';
+            const m = t.match(/^»\s?(.*)$/);
+            if (m) return `<div class="cat-literal-orig">${escapeHtml(m[1])}</div>`;
+            return `<div class="cat-literal-lit">${escapeHtml(t)}</div>`;
+        }).join('');
+        return `<details class="cat-literal"><summary>🔍 원문·직역 보기</summary><div class="cat-literal-body">${body}</div></details>`;
+    }
+    
+    // 폴백: 짝 형식 아님 → 원문 통짜 + 직역 통짜 2블럭
+    const litHtml = escapeHtml(literalText).replace(/\n/g, '<br>');
     if (originalText) {
-        const origHtml = escape(originalText);
+        const origHtml = escapeHtml(originalText).replace(/\n/g, '<br>');
         return `<details class="cat-literal"><summary>🔍 원문·직역 보기</summary><div class="cat-literal-body"><div class="cat-literal-label">📜 원문</div><div class="cat-literal-orig">${origHtml}</div><div class="cat-literal-label">🔍 직역</div><div>${litHtml}</div></div></details>`;
     }
     return `<details class="cat-literal"><summary>🔍 직역 보기</summary><div class="cat-literal-body">${litHtml}</div></details>`;

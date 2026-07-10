@@ -726,15 +726,17 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         }
         
         // 🚨 번역 언어 검증: 한국어 번역인데 한국어가 거의 없음
-        if (targetLang === 'Korean' && cleaned.length > 50) {
-            const koreanChars = (cleaned.match(/[가-힣]/g) || []).length;
-            const koreanRatio = koreanChars / cleaned.length;
+        // 직역 병기 파트엔 원문(영어)이 echo되므로 검증은 자연번역 파트에만 (오탐 방지)
+        const checkText = splitLiteralAppendix(cleaned).natural;
+        if (targetLang === 'Korean' && checkText.length > 50) {
+            const koreanChars = (checkText.match(/[가-힣]/g) || []).length;
+            const koreanRatio = koreanChars / checkText.length;
             if (koreanRatio < 0.15) {
                 console.warn(`[CAT] ⚠️ 한국어 비율 매우 낮음: ${Math.round(koreanRatio * 100)}%`);
                 catNotify(`${getThemeEmoji()} 번역에 한국어가 거의 없어요. AI가 번역 실패한 것 같아요.`, "warning");
             } else if (koreanRatio < 0.5 && koreanRatio >= 0.15) {
                 // 영문이 많이 섞임 - 일부 단어 번역 안 됨
-                const englishWords = (cleaned.match(/\b[a-zA-Z]{4,}\b/g) || []).length;
+                const englishWords = (checkText.match(/\b[a-zA-Z]{4,}\b/g) || []).length;
                 if (englishWords > 5) {
                     // 🔇 화면 알림 제거 (Yun 요청 2026-07-06: 너무 정신없음) — 콘솔/디버그 로그만 유지
                     console.warn(`[CAT] ⚠️ 영단어 ${englishWords}개 섞임 (번역 누락 가능)`);
@@ -744,7 +746,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             // 🚨 지문 말투 섞임 감지 (콘솔 전용 — 화면 알림 없음, 제보 진단용)
             // 대사("...", 「...」, 『...』) 제거 후 지문만 남겨 -다체 vs -요/-습니다체 혼용 검사
             try {
-                const narrationOnly = cleaned
+                const narrationOnly = checkText
                     .replace(/"[^"]*"/g, '')
                     .replace(/「[^」]*」/g, '')
                     .replace(/『[^』]*』/g, '')
@@ -759,7 +761,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             } catch (e) { /* 감지 실패는 무시 */ }
             
             // 🚨 코드펜스(인포블럭) 내부 미번역 감지: 펜스 안이 영어 그대로 남은 경우
-            const fenceBlocks = [...cleaned.matchAll(/```[a-zA-Z]*\n?([\s\S]*?)```/g)];
+            const fenceBlocks = [...checkText.matchAll(/```[a-zA-Z]*\n?([\s\S]*?)```/g)];
             for (const fb of fenceBlocks) {
                 const inner = fb[1] || '';
                 if (inner.length < 40) continue;
@@ -840,19 +842,29 @@ function assemblePrompt(text, targetLang, isToEnglish, settings, options = {}) {
     
     if (isToEnglish) { parts.push(`Translate the following into English.`); } else { parts.push(`Translate the following into ${targetLang}.`); }
     
-    // 🚨 직역 병기 모드: 자연 번역 완료 후 마커 + 전체 직역 요청 (한국어 타겟 전용)
+    // 🚨 직역 병기 모드: 자연 번역 완료 후 마커 + 문장별 원문↔직역 교차 짝 출력 (한국어 타겟 전용)
     if (settings.literalBilingual === 'on' && !isToEnglish) {
         parts.push(`
 [LITERAL APPENDIX MODE - output structure]
 Step 1: Output the complete natural translation as normal (follow all rules above).
 Step 2: Then output this exact marker ALONE on its own line: <<<CAT_LITERAL>>>
-Step 3: Then output a LITERAL translation of the ENTIRE source text:
+Step 3: Then output the ENTIRE source as ALTERNATING PAIRS, sentence by sentence:
+- Line 1 of each pair: the ORIGINAL sentence exactly as written, prefixed with "» "
+- Line 2: its LITERAL Korean translation (no prefix)
+- One blank line between pairs
+Literal translation rules:
 - Minimize interpretation. Translate what is written, not what is implied.
 - Keep idioms and metaphors as-is rather than localizing them.
-- Preserve the original sentence order and sentence count. Do not merge or split sentences.
-- Korean grammar stays correct and readable — this is faithful translation, not broken word-swapping.
-The natural translation (Step 1) must NOT contain the marker or any literal translation.
-The literal part uses the same formality rules as the natural part.`);
+- One source sentence = one pair. Do not merge, split, or skip sentences.
+- Korean grammar stays correct and readable — faithful translation, not broken word-swapping.
+- Same formality rules as the natural translation.
+Example of Step 3 format:
+» He struck up a conversation as if nothing had happened.
+그는 아무 일도 없었던 것처럼 대화를 시작했다.
+
+» "Morning," he said, not meeting my eyes.
+"좋은 아침." 그가 내 눈을 마주치지 않은 채 말했다.
+The natural translation (Step 1) must NOT contain the marker, the "»" prefix, or any literal translation.`);
     }
     
     // 🚨 대사 병기 모드 프롬프트 삽입
