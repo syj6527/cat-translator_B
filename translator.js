@@ -848,22 +848,29 @@ function assemblePrompt(text, targetLang, isToEnglish, settings, options = {}) {
 [LITERAL APPENDIX MODE - output structure]
 Step 1: Output the complete natural translation as normal (follow all rules above).
 Step 2: Then output this exact marker ALONE on its own line: <<<CAT_LITERAL>>>
-Step 3: Then output the ENTIRE source as ALTERNATING PAIRS, sentence by sentence:
-- Line 1 of each pair: the ORIGINAL sentence exactly as written, prefixed with "» "
-- Line 2: its LITERAL Korean translation (no prefix)
+Step 3: Then output the ENTIRE source as ALTERNATING PAIRS, in CHUNKS:
+- Line 1 of each pair: an ORIGINAL chunk exactly as written, prefixed with "» "
+- Line 2: its LITERAL Korean translation as one block (no prefix)
 - One blank line between pairs
+CHUNK DEFINITION (critical - read carefully):
+- A chunk = a paragraph: a block of text separated by BLANK LINES in the source.
+- If the source puts every sentence on its own line WITHOUT blank lines, that is still ONE flowing passage — group 3 to 6 consecutive sentences into a single chunk. Join them with spaces on one line.
+- NEVER output one-sentence pairs unless a real paragraph genuinely contains only one sentence.
+- Do not merge across blank lines, do not skip anything.
+WRONG (one sentence per pair - FAILURE):
+» I tilted my head.
+나는 고개를 갸웃했다.
+
+» If he wants to do it, why not?
+그가 하고 싶다면, 왜 안 되겠는가?
+CORRECT (sentences grouped into one chunk):
+» I tilted my head. If he wants to do it, why not? I smiled soullessly and slowly crossed my arms.
+나는 고개를 갸웃했다. 그가 그것을 하고 싶다면, 왜 안 되겠는가? 나는 영혼 없이 미소 지으며 천천히 팔짱을 꼈다.
 Literal translation rules:
 - Minimize interpretation. Translate what is written, not what is implied.
 - Keep idioms and metaphors as-is rather than localizing them.
-- One source sentence = one pair. Do not merge, split, or skip sentences.
 - Korean grammar stays correct and readable — faithful translation, not broken word-swapping.
 - Same formality rules as the natural translation.
-Example of Step 3 format:
-» He struck up a conversation as if nothing had happened.
-그는 아무 일도 없었던 것처럼 대화를 시작했다.
-
-» "Morning," he said, not meeting my eyes.
-"좋은 아침." 그가 내 눈을 마주치지 않은 채 말했다.
 The natural translation (Step 1) must NOT contain the marker, the "»" prefix, or any literal translation.`);
     }
     
