@@ -249,3 +249,18 @@ button.cat-edit-history-restore,
     border-left: 2px solid rgba(150, 150, 150, 0.45);
     line-height: 1.55;
 }
+
+/* 직역 병기 — 원문/직역 라벨 구조 */
+.mes_text details.cat-literal .cat-literal-label {
+    font-size: 0.78em;
+    font-weight: 600;
+    opacity: 0.55;
+    margin: 6px 0 2px 0;
+    letter-spacing: 0.03em;
+}
+.mes_text details.cat-literal .cat-literal-label:first-child { margin-top: 0; }
+.mes_text details.cat-literal .cat-literal-orig {
+    opacity: 0.75;
+    font-style: italic;
+    margin-bottom: 4px;
+}

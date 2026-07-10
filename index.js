@@ -229,8 +229,9 @@ async function doTranslateMessage(msgId, msg, textToTranslate, isInput, prevTran
         let displayWithLiteral = result.text;
         if (result.literal && !isInput) {
             msg.extra.cat_literal = result.literal;
-            displayWithLiteral = result.text + '\n\n' + buildLiteralDetailsHtml(result.literal);
-            console.log('[CAT] 🔍 직역 병기 합성 완료');
+            // 🚨 원문도 접이식 안에 포함 (이미 보유한 original_mes 재활용 — 토큰 0)
+            displayWithLiteral = result.text + '\n\n' + buildLiteralDetailsHtml(result.literal, msg.extra.original_mes || textToTranslate);
+            console.log('[CAT] 🔍 직역 병기 합성 완료 (원문 포함)');
         } else {
             delete msg.extra.cat_literal;
         }

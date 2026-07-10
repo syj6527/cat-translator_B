@@ -530,13 +530,19 @@ export function splitLiteralAppendix(text) {
 }
 
 // 직역 텍스트 → 접이식 <details> HTML (ST 네이티브 렌더, 탭 이벤트 JS 불필요)
-export function buildLiteralDetailsHtml(literalText) {
-    const esc = String(literalText)
+// originalText 전달 시 원문도 함께 표시 (토큰 0 — 이미 보유한 데이터 재활용)
+export function buildLiteralDetailsHtml(literalText, originalText = null) {
+    const escape = (s) => String(s)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/\n/g, '<br>');
-    return `<details class="cat-literal"><summary>🔍 직역 보기</summary><div class="cat-literal-body">${esc}</div></details>`;
+    const litHtml = escape(literalText);
+    if (originalText) {
+        const origHtml = escape(originalText);
+        return `<details class="cat-literal"><summary>🔍 원문·직역 보기</summary><div class="cat-literal-body"><div class="cat-literal-label">📜 원문</div><div class="cat-literal-orig">${origHtml}</div><div class="cat-literal-label">🔍 직역</div><div>${litHtml}</div></div></details>`;
+    }
+    return `<details class="cat-literal"><summary>🔍 직역 보기</summary><div class="cat-literal-body">${litHtml}</div></details>`;
 }
 
 // display_text에서 직역 details 블록 제거 (재번역 prevTranslation 오염 방지용)
