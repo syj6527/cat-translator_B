@@ -541,13 +541,31 @@ export function buildLiteralDetailsHtml(literalText, originalText = null) {
     const hasPairs = lines.some(l => /^»\s?/.test(l.trim()));
     
     if (hasPairs) {
-        // 교차 짝 렌더: » 줄 = 원문 스타일, 나머지 = 직역, 빈 줄 = 짝 간격
-        const body = lines.map(line => {
+        // 교차 짝 렌더 — 네이티브 태그 구조 (p=짝 간격, em=원문 이탤릭, br=짝 내부 줄바꿈)
+        // ST 새니타이저가 class를 벗기거나 CSS가 캐시돼도 브라우저 기본 스타일로 간격·구분 유지됨
+        const pairs = [];
+        let cur = null;
+        for (const line of lines) {
             const t = line.trim();
-            if (!t) return '<div class="cat-literal-gap"></div>';
+            if (!t) continue;
             const m = t.match(/^»\s?(.*)$/);
-            if (m) return `<div class="cat-literal-orig">${escapeHtml(m[1])}</div>`;
-            return `<div class="cat-literal-lit">${escapeHtml(t)}</div>`;
+            if (m) {
+                if (cur) pairs.push(cur);
+                cur = { orig: m[1], lit: [] };
+            } else if (cur) {
+                cur.lit.push(t);
+            } else {
+                // » 앞에 떠도는 줄 → 자체 짝으로 (원문 없이)
+                pairs.push({ orig: null, lit: [t] });
+            }
+        }
+        if (cur) pairs.push(cur);
+        const body = pairs.map(p => {
+            const litHtml = p.lit.map(escapeHtml).join('<br>');
+            if (p.orig !== null) {
+                return `<p class="cat-literal-pair"><em class="cat-literal-orig">${escapeHtml(p.orig)}</em><br>${litHtml}</p>`;
+            }
+            return `<p class="cat-literal-pair">${litHtml}</p>`;
         }).join('');
         return `<details class="cat-literal"><summary>🔍 원문·직역 보기</summary><div class="cat-literal-body">${body}</div></details>`;
     }
