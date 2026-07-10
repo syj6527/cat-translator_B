@@ -508,3 +508,39 @@ export function analyzeSpeechPatterns(contextMessages) {
     
     return patterns.length > 0 ? patterns.join('\n') : null;
 }
+
+// ============================================================
+// 🔍 직역 병기 (Literal Appendix) 헬퍼
+// ============================================================
+
+// AI 출력에서 자연번역 / 직역 파트 분리
+// 마커가 없으면 { natural: 전체, literal: null } — 우아한 실패
+export function splitLiteralAppendix(text) {
+    if (!text) return { natural: text, literal: null };
+    const markerRe = /\n?\s*<{2,3}\s*CAT_LITERAL\s*>{2,3}\s*\n?/i;
+    const m = text.match(markerRe);
+    if (!m) return { natural: text, literal: null };
+    const idx = m.index;
+    const natural = text.slice(0, idx).trim();
+    const literal = text.slice(idx + m[0].length).trim();
+    // 직역 파트가 비어있으면 (토큰 잘림 등) 자연번역만
+    if (!literal) return { natural, literal: null };
+    // 자연번역 파트에 마커 잔재가 또 있으면 제거 (모델 이중 출력 방어)
+    return { natural: natural.replace(markerRe, '').trim(), literal };
+}
+
+// 직역 텍스트 → 접이식 <details> HTML (ST 네이티브 렌더, 탭 이벤트 JS 불필요)
+export function buildLiteralDetailsHtml(literalText) {
+    const esc = String(literalText)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+    return `<details class="cat-literal"><summary>🔍 직역 보기</summary><div class="cat-literal-body">${esc}</div></details>`;
+}
+
+// display_text에서 직역 details 블록 제거 (재번역 prevTranslation 오염 방지용)
+export function stripLiteralDetails(text) {
+    if (!text) return text;
+    return text.replace(/\s*<details class="cat-literal">[\s\S]*?<\/details>\s*/g, '').trim();
+}
