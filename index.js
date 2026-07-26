@@ -310,8 +310,6 @@ async function doTranslateMessage(msgId, msg, textToTranslate, isInput, prevTran
             const preview = result.text.substring(0, 25) + (result.text.length > 25 ? '...' : '');
             catNotify(`${getCompletionEmoji()} 번역 완료! '${preview}'`, "success");
         }
-    } else if (!silent && result === null) {
-        catNotify(`${getThemeEmoji()} 번역 결과를 받지 못했어요.`, "warning");
     }
 }
 
@@ -1286,4 +1284,3 @@ function setupChatPreviewTranslation() {
     
     console.log(`[CAT] 📁 채팅 미리보기 옵저버 등록 (정리만 자동, 번역은 수동)`);
 }
-

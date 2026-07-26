@@ -105,6 +105,88 @@
     #send_but { margin-left: 2px !important; }
 }
 
+/* LLM 응답 로그: 모바일에서도 상단과 닫기 버튼이 항상 화면 안에 남도록 고정 */
+dialog.cat-debug-overlay {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    isolation: isolate;
+}
+dialog.cat-debug-overlay::backdrop { background: transparent; }
+.cat-debug-modal {
+    position: absolute !important;
+    top: max(8px, env(safe-area-inset-top, 0px)) !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: calc(100vw - 24px) !important;
+    max-width: 600px !important;
+    max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px)) !important;
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px)) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 12px;
+    box-sizing: border-box !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+.cat-debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid rgba(128,128,128,0.25);
+    background: inherit;
+    box-sizing: border-box;
+    z-index: 2;
+}
+.cat-debug-title {
+    min-width: 0;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+.cat-debug-close {
+    flex: 0 0 auto;
+    line-height: 1;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: rgba(255,255,255,0.2);
+}
+.cat-debug-body {
+    min-height: 0;
+    padding: 12px 20px 20px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+    .cat-debug-modal {
+        top: max(6px, env(safe-area-inset-top, 0px)) !important;
+        width: calc(100vw - 12px) !important;
+        max-height: calc(100vh - 12px - env(safe-area-inset-top, 0px)) !important;
+        max-height: calc(100dvh - 12px - env(safe-area-inset-top, 0px)) !important;
+        border-radius: 8px;
+    }
+    .cat-debug-header { padding: 12px 12px 10px; }
+    .cat-debug-body { padding: 10px 12px 14px; }
+    .cat-debug-title { font-size: 0.98em !important; }
+    .cat-debug-close { font-size: 1.7em !important; padding: 5px 8px !important; }
+}
+
 /* ============================================================
    v1.0.5: 수정 히스토리 / 손상 복구 UI
    ============================================================ */
