@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.6 - utils.js
+// 🙀 Translator Beta v1.0.5-beta.7 - utils.js
 // 유틸리티: 알림, 정규식 세탁기, HTML/CSS 방어, 언어 감지
 // ============================================================
 
@@ -357,17 +357,19 @@ export function restoreTranslationStructure(text, protection) {
         restored = restored.replace(token.marker, token.value);
     }
 
-    const keyRepair = repairStructuredKeyPrefixes(protection.source, restored);
-    restored = keyRepair.text;
-    if (keyRepair.repairedKeys > 0) {
-        console.log(`[CAT] 🔧 구조 키 ${keyRepair.repairedKeys}개 자동 복원`);
+    const validation = validateTranslationStructure(protection.source, restored);
+    if (validation.repairedKeys > 0) {
+        console.log(`[CAT] 🔧 구조 키 ${validation.repairedKeys}개 자동 복원`);
     }
-    
-    const parity = compareProtectedStructure(protection.source, restored);
-    if (!parity.ok) {
-        return { ok: false, text: null, reason: parity.reason };
+    if (!validation.ok) {
+        return { ok: false, text: null, reason: validation.reason };
     }
-    return { ok: true, text: restored, reason: null };
+    return {
+        ok: true,
+        text: validation.text,
+        reason: null,
+        boundaryRecovery: validation.boundaryRecovery || null
+    };
 }
 
 export function restoreTranslationTokens(text, protection) {
@@ -388,15 +390,91 @@ export function restoreTranslationTokens(text, protection) {
 }
 
 export function validateTranslationStructure(source, output) {
-    const normalized = repairStructuredKeyPrefixes(
-        String(source || ''),
-        String(output || '')
-    );
+    const sourceText = String(source || '');
+    const normalized = repairStructuredKeyPrefixes(sourceText, String(output || ''));
+    const parity = compareProtectedStructure(sourceText, normalized.text);
+    if (!parity.ok) {
+        const recovered = recoverBoundaryContextLeak(sourceText, normalized.text);
+        if (recovered) {
+            return {
+                ok: true,
+                reason: null,
+                text: recovered.text,
+                repairedKeys: recovered.repairedKeys,
+                boundaryRecovery: recovered.boundaryRecovery
+            };
+        }
+    }
     return {
-        ...compareProtectedStructure(String(source || ''), normalized.text),
+        ...parity,
         text: normalized.text,
-        repairedKeys: normalized.repairedKeys
+        repairedKeys: normalized.repairedKeys,
+        boundaryRecovery: null
     };
+}
+
+// 일부 모델이 이전 문맥의 완결된 정보블럭을 현재 번역 앞뒤에 붙이는 경우만 복구한다.
+// 내부 삽입이나 후보가 둘 이상인 응답은 원문 일부를 잘못 버릴 수 있으므로 그대로 거부한다.
+function recoverBoundaryContextLeak(source, output) {
+    const sourceMatches = getStructureMatches(source);
+    const outputMatches = getStructureMatches(output);
+    if (sourceMatches.length === 0 || outputMatches.length <= sourceMatches.length) {
+        return null;
+    }
+
+    const candidates = new Map();
+    const lastOffset = outputMatches.length - sourceMatches.length;
+    for (let offset = 0; offset <= lastOffset; offset++) {
+        let signatureMatches = true;
+        for (let i = 0; i < sourceMatches.length; i++) {
+            if (outputMatches[offset + i].value !== sourceMatches[i].value) {
+                signatureMatches = false;
+                break;
+            }
+        }
+        if (!signatureMatches) continue;
+
+        const hasPrefix = offset > 0;
+        const suffixIndex = offset + sourceMatches.length;
+        const hasSuffix = suffixIndex < outputMatches.length;
+        if (!hasPrefix && !hasSuffix) continue;
+
+        const start = hasPrefix ? outputMatches[offset - 1].end : 0;
+        const end = hasSuffix ? outputMatches[suffixIndex].index : output.length;
+        const removedPrefix = hasPrefix ? output.slice(0, start) : '';
+        const removedSuffix = hasSuffix ? output.slice(end) : '';
+        const prefixBlocks = hasPrefix ? countCompleteBoundaryFenceBlocks(removedPrefix) : 0;
+        const suffixBlocks = hasSuffix ? countCompleteBoundaryFenceBlocks(removedSuffix) : 0;
+        if (hasPrefix && prefixBlocks === 0) continue;
+        if (hasSuffix && suffixBlocks === 0) continue;
+
+        const candidateText = output.slice(start, end).trim();
+        const normalized = repairStructuredKeyPrefixes(source, candidateText);
+        const parity = compareProtectedStructure(source, normalized.text);
+        if (!parity.ok) continue;
+
+        candidates.set(normalized.text, {
+            text: normalized.text,
+            repairedKeys: normalized.repairedKeys,
+            boundaryRecovery: {
+                removedPrefix: hasPrefix,
+                removedSuffix: hasSuffix,
+                removedFenceBlocks: prefixBlocks + suffixBlocks
+            }
+        });
+    }
+
+    return candidates.size === 1 ? [...candidates.values()][0] : null;
+}
+
+function countCompleteBoundaryFenceBlocks(fragment) {
+    const text = String(fragment || '');
+    const fenceMarkers = text.match(/```[^\n]*/g) || [];
+    const completeBlocks = text.match(/```[^\n]*\n[\s\S]*?```/g) || [];
+    if (completeBlocks.length === 0 || fenceMarkers.length !== completeBlocks.length * 2) {
+        return 0;
+    }
+    return completeBlocks.length;
 }
 
 function compareProtectedStructure(source, output) {
@@ -461,6 +539,10 @@ function compareProtectedStructure(source, output) {
 }
 
 function getStructureSignature(text) {
+    return getStructureMatches(text).map(item => item.value);
+}
+
+function getStructureMatches(text) {
     const matches = [];
     const patterns = [
         /```[^\n]*/g,
@@ -469,10 +551,14 @@ function getStructureSignature(text) {
     ];
     patterns.forEach((pattern) => {
         for (const match of String(text || '').matchAll(pattern)) {
-            matches.push({ index: match.index, value: match[0] });
+            matches.push({
+                index: match.index,
+                end: match.index + match[0].length,
+                value: match[0]
+            });
         }
     });
-    return matches.sort((a, b) => a.index - b.index).map(item => item.value);
+    return matches.sort((a, b) => a.index - b.index);
 }
 
 function getFencedBlockShapes(text) {

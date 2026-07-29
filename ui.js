@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.6 - ui.js
+// 🙀 Translator Beta v1.0.5-beta.7 - ui.js
 // ============================================================
 import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin } from './cache.js';
@@ -854,6 +854,7 @@ function showDebugPopup() {
     const mode = log?.mode || '(없음)';
     const model = log?.model || '(없음)';
     const error = log?.error || '(에러 없음)';
+    const recovery = log?.recovery || '(복구 없음)';
     const prompt = log?.prompt ? (log.prompt.length > 800 ? log.prompt.substring(0, 800) + '...(생략)' : log.prompt) : '(아직 요청 없음)';
     const raw = log?.rawResponse ? (log.rawResponse.length > 800 ? log.rawResponse.substring(0, 800) + '...(생략)' : log.rawResponse) : '(아직 LLM 응답 없음)';
     const cleaned = log?.cleaned ? (log.cleaned.length > 800 ? log.cleaned.substring(0, 800) + '...(생략)' : log.cleaned) : '(없음)';
@@ -869,7 +870,7 @@ function showDebugPopup() {
             <div class="cat-debug-body">
             <div style="background:rgba(255,100,100,0.1); border:1px solid rgba(255,100,100,0.3); border-radius:8px; padding:10px; margin-bottom:10px;">
                 <div style="font-weight:bold; margin-bottom:4px;">📌 에러 정보</div>
-                <div style="font-size:0.85em; opacity:0.8;">시각: ${ts}<br>에러: ${error}</div>
+                <div style="font-size:0.85em; opacity:0.8;">시각: ${ts}<br>에러: ${error}<br>복구: ${recovery}</div>
             </div>
             <div style="background:rgba(100,180,255,0.1); border:1px solid rgba(100,180,255,0.3); border-radius:8px; padding:10px; margin-bottom:10px;">
                 <div style="font-weight:bold; margin-bottom:4px;">🔑 API 호출 상태</div>
@@ -938,7 +939,7 @@ function showDebugPopup() {
     overlay.find('.cat-debug-close').on('click', closeOverlay);
     overlay.on('click', (e) => { if ($(e.target).hasClass('cat-debug-overlay')) closeOverlay(); });
     overlay.find('.cat-debug-copy').on('click', () => {
-        const copyText = `[🙀 Translator Beta 디버그 로그]\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
+        const copyText = `[🙀 Translator Beta 디버그 로그]\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
         navigator.clipboard.writeText(copyText).then(() => catNotify('📋 디버그 로그 복사 완료!', 'success')).catch(() => catNotify('복사 실패 — 수동으로 복사해주세요', 'warning'));
     });
 }

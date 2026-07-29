@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.6 - translator.js
+// 🙀 Translator Beta v1.0.5-beta.7 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
 import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, analyzeLanguage, isClearlyLanguage } from './utils.js';
@@ -426,7 +426,7 @@ const SAFETY_SETTINGS = [
 ];
 
 // 🚨 디버그 로그: 마지막 요청/응답 저장 (설정창에서 확인 가능)
-let _lastDebugLog = { timestamp: null, mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null };
+let _lastDebugLog = { timestamp: null, mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null };
 export function getLastDebugLog() { return _lastDebugLog; }
 
 function hashScopeValue(value) {
@@ -508,6 +508,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         if (cached) {
             const cachedSplit = splitLiteralAppendix(cached.translated);
             const cachedStructure = validateTranslationStructure(text, cachedSplit.natural);
+            if (cachedStructure.boundaryRecovery) {
+                console.warn('[CAT] 🧹 캐시의 이전 문맥 경계 코드블럭 제거 후 구조 검증 통과');
+            }
             const cachedNatural = cachedStructure.text || cachedSplit.natural;
             const cachedLiteral = cached.literal || cachedSplit.literal;
             const cachedCombined = cachedLiteral
@@ -590,6 +593,17 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             fromCache: false
         };
     };
+
+    const recordBoundaryRecovery = (recovery) => {
+        if (!recovery) return;
+        const boundaries = [];
+        if (recovery.removedPrefix) boundaries.push('앞쪽');
+        if (recovery.removedSuffix) boundaries.push('뒤쪽');
+        const blockCount = recovery.removedFenceBlocks || 1;
+        const message = `이전 문맥 ${boundaries.join('·')} 코드블럭 ${blockCount}개 제거 후 검증 통과`;
+        _lastDebugLog.recovery = message;
+        console.warn(`[CAT] 🧹 ${message}`);
+    };
     
     const retryRejectedTranslation = async (reason, finalMessage = null) => {
         _lastDebugLog.error = `응답 검증 실패: ${reason}`;
@@ -634,7 +648,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
 
     try {
         let result = ""; let thought = null;
-        _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null };
+        _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null };
         
         if (settings.profile && stContext.ConnectionManagerRequestService) {
             // 🚨 프로필 모드: systemInstruction 미지원 → 유저 메시지에 합침
@@ -872,6 +886,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (!naturalRestored.ok) {
                 return await retryRejectedTranslation(naturalRestored.reason);
             }
+            recordBoundaryRecovery(naturalRestored.boundaryRecovery);
             const literalRestored = restoreTranslationTokens(initialLiteralSplit.literal, structureProtection);
             if (!literalRestored.ok) {
                 return await retryRejectedTranslation(literalRestored.reason);
@@ -885,6 +900,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (!restored.ok) {
                 return await retryRejectedTranslation(restored.reason);
             }
+            recordBoundaryRecovery(restored.boundaryRecovery);
             cleaned = restored.text;
         }
         
@@ -911,8 +927,11 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (!fallbackStructure.ok) {
                 return await retryRejectedTranslation(fallbackStructure.reason);
             }
+            recordBoundaryRecovery(fallbackStructure.boundaryRecovery);
             if (fallbackStructure.text !== naturalCleaned) {
-                console.log(`[CAT] 🔧 구조 키 ${fallbackStructure.repairedKeys}개 자동 복원`);
+                if (fallbackStructure.repairedKeys > 0) {
+                    console.log(`[CAT] 🔧 구조 키 ${fallbackStructure.repairedKeys}개 자동 복원`);
+                }
                 naturalCleaned = fallbackStructure.text;
                 cleaned = restoredSplit.literal
                     ? `${naturalCleaned}\n<<<CAT_LITERAL>>>\n${restoredSplit.literal}`
