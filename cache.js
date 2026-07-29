@@ -1,15 +1,16 @@
 // ============================================================
-// 🐱 Translator v1.0.4 - cache.js
+// 🙀 Translator Beta v1.0.5-beta.4 - cache.js
 // IndexedDB 영구 캐시: 유사 문장 매칭, Thought 캐싱, 통계
 // ============================================================
 
 import { normalizeText } from './utils.js';
 
-const DB_NAME = 'CatTranslatorCache';
+const DB_NAME = 'CatTranslatorBetaCache';
 const DB_VERSION = 2;
 const STORE_TRANSLATIONS = 'translations';
 const STORE_STATS = 'stats';
 const EXPIRY_DAYS = 30;
+const CACHE_KEY_VERSION = 'raw-v4';
 
 let db = null;
 let stats = { hits: 0, misses: 0, tokensSaved: 0 };
@@ -71,18 +72,25 @@ export function getStats() {
     };
 }
 
-// ─── 캐시 조회 (유사 문장 매칭 + 모델별 분리) ─────────────────────
-export async function getCached(originalText, targetLang, modelKey = 'default') {
+function normalizeSourceForKey(text) {
+    return String(text || '').replace(/\r\n/g, '\n').trim();
+}
+
+export function buildCacheKey(originalText, targetLang, modelKey = 'default') {
+    return `${CACHE_KEY_VERSION}:${normalizeSourceForKey(originalText)}::${targetLang}::${modelKey}`;
+}
+
+// ─── 캐시 조회 (원문 구조 + 모델 + 문맥별 분리) ─────────────────────
+export async function getCached(originalText, targetLang, modelKey = 'default', scopeKey = '') {
     if (!db) return null;
-    const normalized = normalizeText(originalText);
-    const key = `${normalized}::${targetLang}::${modelKey}`;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
 
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readonly');
         const store = tx.objectStore(STORE_TRANSLATIONS);
         const result = await promisifyRequest(store.get(key));
 
-        if (result && !isExpired(result.timestamp)) {
+        if (result && !isExpired(result.timestamp) && (result.scopeKey || '') === scopeKey) {
             stats.hits++;
             stats.tokensSaved += estimateTokens(originalText);
             saveStats();
@@ -98,8 +106,7 @@ export async function getCached(originalText, targetLang, modelKey = 'default') 
 // ─── 캐시 삭제 (특정 항목) ──────────────────────────────────────
 export async function deleteCached(originalText, targetLang, modelKey = 'default') {
     if (!db) return;
-    const normalized = normalizeText(originalText);
-    const key = `${normalized}::${targetLang}::${modelKey}`;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readwrite');
         const store = tx.objectStore(STORE_TRANSLATIONS);
@@ -107,11 +114,11 @@ export async function deleteCached(originalText, targetLang, modelKey = 'default
     } catch (e) { /* ignore */ }
 }
 
-// ─── 캐시 저장 (모델별 분리) ──────────────────────────────────────
-export async function setCached(originalText, targetLang, translated, thought = null, modelKey = 'default', literal = null) {
+// ─── 캐시 저장 (원문 구조 + 모델 + 문맥별 분리) ──────────────────────
+export async function setCached(originalText, targetLang, translated, thought = null, modelKey = 'default', literal = null, scopeKey = '') {
     if (!db) return;
     const normalized = normalizeText(originalText);
-    const key = `${normalized}::${targetLang}::${modelKey}`;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
 
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readwrite');
@@ -137,19 +144,19 @@ export async function setCached(originalText, targetLang, translated, thought = 
             literal,
             lang: targetLang,
             thought,
+            scopeKey,
             history,
             timestamp: Date.now()
         };
 
-        store.put(entry);
+        await promisifyRequest(store.put(entry));
     } catch (e) { console.error('[CAT] Cache write error:', e); }
 }
 
 // ─── 히스토리 조회 (모델별) ──────────────────────────────────
 export async function getHistory(originalText, targetLang, modelKey = 'default') {
     if (!db) return [];
-    const normalized = normalizeText(originalText);
-    const key = `${normalized}::${targetLang}::${modelKey}`;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
 
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readonly');
@@ -162,8 +169,7 @@ export async function getHistory(originalText, targetLang, modelKey = 'default')
 // ─── 즐겨찾기 핀 토글 (모델별) ──────────────────────────────
 export async function togglePin(originalText, targetLang, translationText, modelKey = 'default') {
     if (!db) return;
-    const normalized = normalizeText(originalText);
-    const key = `${normalized}::${targetLang}::${modelKey}`;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
 
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readwrite');
@@ -173,7 +179,7 @@ export async function togglePin(originalText, targetLang, translationText, model
             const item = result.history.find(h => h.text === translationText);
             if (item) {
                 item.pinned = !item.pinned;
-                store.put(result);
+                await promisifyRequest(store.put(result));
             }
         }
     } catch (e) { /* 무시 */ }
@@ -185,7 +191,7 @@ export async function clearAllCache() {
     try {
         const tx = db.transaction(STORE_TRANSLATIONS, 'readwrite');
         const store = tx.objectStore(STORE_TRANSLATIONS);
-        store.clear();
+        await promisifyRequest(store.clear());
         stats = { hits: 0, misses: 0, tokensSaved: 0 };
         saveStats();
     } catch (e) { console.error('[CAT] Cache clear error:', e); }
@@ -224,7 +230,7 @@ export function exportSettings(settings) {
     const a = document.createElement('a');
     a.href = url;
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    a.download = `cat-translator-settings-${date}.json`;
+    a.download = `cat-translator-beta-settings-${date}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

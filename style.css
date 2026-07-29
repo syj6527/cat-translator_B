@@ -1,5 +1,5 @@
 /* ============================================================
-   🐱 Translator v1.0.4 - style.css
+   🙀 Translator Beta v1.0.5-beta.4 - style.css
    ============================================================ */
 [data-cat-theme="cat"], body:not([data-cat-theme]) {
     --ca-glow: rgba(255, 165, 0, 0.6);
@@ -108,10 +108,11 @@
 /* LLM 응답 로그: 모바일에서도 상단과 닫기 버튼이 항상 화면 안에 남도록 고정 */
 dialog.cat-debug-overlay {
     position: fixed !important;
-    inset: 0 !important;
-    width: 100vw !important;
-    height: 100vh !important;
-    height: 100dvh !important;
+    inset: auto !important;
+    top: var(--cat-debug-vv-top, 0px) !important;
+    left: var(--cat-debug-vv-left, 0px) !important;
+    width: var(--cat-debug-vv-width, 100vw) !important;
+    height: var(--cat-debug-vv-height, 100dvh) !important;
     max-width: none !important;
     max-height: none !important;
     margin: 0 !important;
@@ -119,6 +120,7 @@ dialog.cat-debug-overlay {
     border: 0 !important;
     box-sizing: border-box !important;
     overflow: hidden !important;
+    transform: none !important;
     isolation: isolate;
 }
 dialog.cat-debug-overlay::backdrop { background: transparent; }
@@ -127,10 +129,9 @@ dialog.cat-debug-overlay::backdrop { background: transparent; }
     top: max(8px, env(safe-area-inset-top, 0px)) !important;
     left: 50% !important;
     transform: translateX(-50%) !important;
-    width: calc(100vw - 24px) !important;
+    width: calc(100% - 24px) !important;
     max-width: 600px !important;
-    max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px)) !important;
-    max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px)) !important;
+    max-height: calc(100% - 16px - env(safe-area-inset-top, 0px)) !important;
     margin: 0 !important;
     padding: 0 !important;
     border-radius: 12px;
@@ -176,9 +177,8 @@ dialog.cat-debug-overlay::backdrop { background: transparent; }
 @media (max-width: 768px) {
     .cat-debug-modal {
         top: max(6px, env(safe-area-inset-top, 0px)) !important;
-        width: calc(100vw - 12px) !important;
-        max-height: calc(100vh - 12px - env(safe-area-inset-top, 0px)) !important;
-        max-height: calc(100dvh - 12px - env(safe-area-inset-top, 0px)) !important;
+        width: calc(100% - 12px) !important;
+        max-height: calc(100% - 12px - env(safe-area-inset-top, 0px)) !important;
         border-radius: 8px;
     }
     .cat-debug-header { padding: 12px 12px 10px; }

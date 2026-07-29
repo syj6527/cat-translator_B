@@ -1,5 +1,5 @@
 // ============================================================
-// 🐱 Translator v1.0.4 - utils.js
+// 🙀 Translator Beta v1.0.5-beta.4 - utils.js
 // 유틸리티: 알림, 정규식 세탁기, HTML/CSS 방어, 언어 감지
 // ============================================================
 
@@ -664,22 +664,99 @@ export function getModelTheme(modelName) {
 // 🚨 언어 감지용 메타 토큰 제거: ooc/rp 약어, {{매크로}}, <태그>, URL이
 // 짧은 인풋의 언어 비율을 왜곡하는 것 방지 (감지/경고 판정 공용)
 export function stripMetaForDetection(text) {
-    return text
+    return String(text || '')
         .replace(/\{\{[^}]*\}\}/g, '')                          // {{char}}, {{user}} 등 매크로
         .replace(/<[^>]{1,30}>/g, '')                           // <user>, <char> 등 태그
         .replace(/\b(ooc|OOC|rp|RP|ic|IC|btw|ps|PS|ai|AI)\b/g, '') // RP 메타 약어
         .replace(/https?:\/\/\S+/g, '');                        // URL
 }
 
+export function analyzeLanguage(text) {
+    const stripped = stripMetaForDetection(text);
+    const chars = {
+        Korean: (stripped.match(/[가-힣]/g) || []).length,
+        English: (stripped.match(/[a-zA-Z]/g) || []).length,
+        Japanese: (stripped.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length,
+        Chinese: (stripped.match(/[\u4E00-\u9FFF]/g) || []).length
+    };
+    const words = {
+        Korean: (stripped.match(/[가-힣]+/g) || []).length,
+        English: (stripped.match(/[a-zA-Z]+/g) || []).length,
+        Japanese: (stripped.match(/[\u3040-\u309F\u30A0-\u30FF]+/g) || []).length,
+        Chinese: chars.Chinese
+    };
+    const scores = {
+        Korean: words.Korean + chars.Korean / 2.5,
+        English: words.English + chars.English / 5,
+        Japanese: words.Japanese + chars.Japanese / 2,
+        Chinese: chars.Chinese / 1.5
+    };
+    const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    const totalScore = ranked.reduce((sum, [, score]) => sum + score, 0);
+    const dominant = totalScore > 0 ? ranked[0][0] : null;
+    const confidence = totalScore > 0 ? ranked[0][1] / totalScore : 0;
+
+    return {
+        stripped,
+        chars,
+        words,
+        scores,
+        dominant,
+        confidence,
+        total: Object.values(chars).reduce((sum, count) => sum + count, 0)
+    };
+}
+
+export function isClearlyLanguage(textOrAnalysis, language, minConfidence = 0.72) {
+    const analysis = typeof textOrAnalysis === 'string'
+        ? analyzeLanguage(textOrAnalysis)
+        : textOrAnalysis;
+    if (!analysis || !language || analysis.total === 0) return false;
+
+    const chars = analysis.chars?.[language] || 0;
+    const words = analysis.words?.[language] || 0;
+    const competingChars = Object.entries(analysis.chars || {})
+        .filter(([key]) => key !== language)
+        .reduce((sum, [, count]) => sum + count, 0);
+
+    if (chars === 0) return false;
+    if (competingChars === 0 && chars >= 2) return true;
+    if (analysis.dominant !== language) return false;
+    if (words >= 2 && analysis.confidence >= minConfidence) return true;
+    return chars >= 4 && analysis.confidence >= Math.max(0.82, minConfidence);
+}
+
+export function getInputTargetLanguage(settings = {}) {
+    const dialogueMap = { 'ko-en': 'English', 'ko-ja': 'Japanese', 'ko-zh': 'Chinese' };
+    const dialogueMode = settings.dialogueBilingual || 'off';
+    if (dialogueMap[dialogueMode]) return dialogueMap[dialogueMode];
+
+    const bidirectionalMode = settings.bidirectional || 'off';
+    if (dialogueMap[bidirectionalMode]) return dialogueMap[bidirectionalMode];
+
+    const configuredTarget = settings.targetLang || 'Korean';
+    return configuredTarget === 'Korean' ? 'English' : configuredTarget;
+}
+
+export function resolveInputTranslationDirection(text, settings = {}) {
+    const analysis = analyzeLanguage(text);
+    const targetLang = getInputTargetLanguage(settings);
+    return {
+        targetLang,
+        sourceLanguage: analysis.dominant,
+        shouldTranslate: analysis.total > 0 && !isClearlyLanguage(analysis, targetLang),
+        analysis
+    };
+}
+
 export function detectLanguageDirection(text, settings) {
     // 🚨 언어 감지 전 메타 토큰 제거: ooc/rp/매크로 같은 영문 토큰이
     // "ooc: rp 중단하고 답변해" 같은 짧은 한국어 인풋의 비율을 왜곡하는 것 방지
-    const stripped = stripMetaForDetection(text);
-    
-    const korCount = (stripped.match(/[가-힣]/g) || []).length;
-    const engCount = (stripped.match(/[a-zA-Z]/g) || []).length;
-    const jpCount = (stripped.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
-    const cnCount = (stripped.match(/[\u4E00-\u9FFF]/g) || []).length;
+    const analysis = analyzeLanguage(text);
+    const korCount = analysis.chars.Korean;
+    const engCount = analysis.chars.English;
+    const jpCount = analysis.chars.Japanese;
+    const cnCount = analysis.chars.Chinese;
     const total = korCount + engCount + jpCount + cnCount;
 
     if (total === 0) return { isToEnglish: false, targetLang: settings.targetLang };
@@ -694,8 +771,8 @@ export function detectLanguageDirection(text, settings) {
 
     // 한↔영
     if (bidir === 'ko-en') {
-        if (korRatio >= 0.7) return { isToEnglish: true, targetLang: 'English' };
-        if (engRatio >= 0.7) return { isToEnglish: false, targetLang: 'Korean' };
+        if (isClearlyLanguage(analysis, 'Korean')) return { isToEnglish: true, targetLang: 'English' };
+        if (isClearlyLanguage(analysis, 'English')) return { isToEnglish: false, targetLang: 'Korean' };
         // 🚨 혼합 텍스트 (둘 다 0.7 미달): 우세한 쪽을 원문으로 판정
         // 한글이 영문보다 많으면 한국어 원문 → 영어로, 반대면 영어 원문 → 한국어로
         if (korCount > 0 && korCount >= engCount) return { isToEnglish: true, targetLang: 'English' };
@@ -704,14 +781,14 @@ export function detectLanguageDirection(text, settings) {
 
     // 한↔일
     if (bidir === 'ko-ja') {
-        if (korRatio >= 0.7) return { isToEnglish: false, targetLang: 'Japanese' };
-        if (jpRatio >= 0.5) return { isToEnglish: false, targetLang: 'Korean' };
+        if (isClearlyLanguage(analysis, 'Korean')) return { isToEnglish: false, targetLang: 'Japanese' };
+        if (isClearlyLanguage(analysis, 'Japanese', 0.6)) return { isToEnglish: false, targetLang: 'Korean' };
     }
 
     // 한↔중
     if (bidir === 'ko-zh') {
-        if (korRatio >= 0.7) return { isToEnglish: false, targetLang: 'Chinese' };
-        if (cnRatio >= 0.5) return { isToEnglish: false, targetLang: 'Korean' };
+        if (isClearlyLanguage(analysis, 'Korean')) return { isToEnglish: false, targetLang: 'Chinese' };
+        if (isClearlyLanguage(analysis, 'Chinese', 0.6)) return { isToEnglish: false, targetLang: 'Korean' };
     }
 
     return { isToEnglish: false, targetLang: settings.targetLang };
