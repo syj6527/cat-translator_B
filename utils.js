@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.4 - utils.js
+// 🙀 Translator Beta v1.0.5-beta.5 - utils.js
 // 유틸리티: 알림, 정규식 세탁기, HTML/CSS 방어, 언어 감지
 // ============================================================
 
@@ -356,6 +356,12 @@ export function restoreTranslationStructure(text, protection) {
     for (const token of protection.tokens) {
         restored = restored.replace(token.marker, token.value);
     }
+
+    const keyRepair = repairStructuredKeyPrefixes(protection.source, restored);
+    restored = keyRepair.text;
+    if (keyRepair.repairedKeys > 0) {
+        console.log(`[CAT] 🔧 구조 키 ${keyRepair.repairedKeys}개 자동 복원`);
+    }
     
     const parity = compareProtectedStructure(protection.source, restored);
     if (!parity.ok) {
@@ -382,7 +388,15 @@ export function restoreTranslationTokens(text, protection) {
 }
 
 export function validateTranslationStructure(source, output) {
-    return compareProtectedStructure(String(source || ''), String(output || ''));
+    const normalized = repairStructuredKeyPrefixes(
+        String(source || ''),
+        String(output || '')
+    );
+    return {
+        ...compareProtectedStructure(String(source || ''), normalized.text),
+        text: normalized.text,
+        repairedKeys: normalized.repairedKeys
+    };
 }
 
 function compareProtectedStructure(source, output) {
@@ -423,7 +437,7 @@ function compareProtectedStructure(source, output) {
                 return { ok: false, reason: `코드블럭 ${i + 1} 빈 줄 변경 (${lineIndex + 1}행)` };
             }
             
-            const keyPrefix = getStructuredKeyPrefix(srcLine);
+            const keyPrefix = getStructuredKeyPrefix(srcLine, src.language);
             if (keyPrefix && !outLine.startsWith(keyPrefix)) {
                 return { ok: false, reason: `코드블럭 ${i + 1} 키 변경 (${lineIndex + 1}행)` };
             }
@@ -462,8 +476,68 @@ function getStructureSignature(text) {
 }
 
 function getFencedBlockShapes(text) {
-    return [...String(text || '').matchAll(/```[^\n]*\n([\s\S]*?)```/g)]
-        .map(match => ({ lines: match[1].split('\n') }));
+    return [...String(text || '').matchAll(/```([^\n]*)\n([\s\S]*?)```/g)]
+        .map(match => {
+            const openingLength = match[0].indexOf('\n') + 1;
+            const contentStart = match.index + openingLength;
+            return {
+                language: normalizeFenceLanguage(match[1]),
+                lines: match[2].split('\n'),
+                contentStart,
+                contentEnd: contentStart + match[2].length
+            };
+        });
+}
+
+function normalizeFenceLanguage(info) {
+    return String(info || '').trim().split(/\s+/)[0].toLowerCase();
+}
+
+function repairStructuredKeyPrefixes(source, output) {
+    const sourceBlocks = getFencedBlockShapes(source);
+    const outputBlocks = getFencedBlockShapes(output);
+    if (sourceBlocks.length !== outputBlocks.length) {
+        return { text: output, repairedKeys: 0 };
+    }
+
+    let normalized = String(output || '');
+    let repairedKeys = 0;
+    const replacements = [];
+
+    for (let blockIndex = 0; blockIndex < sourceBlocks.length; blockIndex++) {
+        const src = sourceBlocks[blockIndex];
+        const out = outputBlocks[blockIndex];
+        if (src.language !== out.language || src.lines.length !== out.lines.length) continue;
+
+        const fixedLines = [...out.lines];
+        let blockChanged = false;
+        for (let lineIndex = 0; lineIndex < src.lines.length; lineIndex++) {
+            const sourcePrefix = getStructuredKeyPrefix(src.lines[lineIndex], src.language);
+            if (!sourcePrefix || fixedLines[lineIndex].startsWith(sourcePrefix)) continue;
+
+            const outputPrefix = getStructuredKeyPrefix(fixedLines[lineIndex], out.language, true);
+            if (!outputPrefix) continue;
+            fixedLines[lineIndex] = sourcePrefix + fixedLines[lineIndex].slice(outputPrefix.length);
+            repairedKeys++;
+            blockChanged = true;
+        }
+
+        if (blockChanged) {
+            replacements.push({
+                start: out.contentStart,
+                end: out.contentEnd,
+                text: fixedLines.join('\n')
+            });
+        }
+    }
+
+    replacements.sort((a, b) => b.start - a.start);
+    for (const replacement of replacements) {
+        normalized = normalized.slice(0, replacement.start) +
+            replacement.text +
+            normalized.slice(replacement.end);
+    }
+    return { text: normalized, repairedKeys };
 }
 
 function getStructureLayout(text) {
@@ -483,15 +557,29 @@ function getStructureLayout(text) {
     return { regions: regions.length, contentGaps };
 }
 
-function getStructuredKeyPrefix(line) {
-    const jsonKey = line.match(/^(\s*"[^"]+"\s*:\s*)/);
-    if (jsonKey) return jsonKey[1];
-    
-    const bracketKey = line.match(/^(\s*\[[^:\]\n]{1,80}:\s*)/);
-    if (bracketKey) return bracketKey[1];
-    
-    const yamlKey = line.match(/^(\s*(?:-\s*)?[^:\n]{1,80}:\s*)/);
-    return yamlKey ? yamlKey[1] : null;
+function getStructuredKeyPrefix(line, language, allowTightValue = false) {
+    if (/^(?:json|jsonc|json5)$/.test(language)) {
+        const jsonKey = line.match(/^(\s*"(?:(?:\\.)|[^"\\])+"\s*:\s*)/);
+        if (jsonKey) return jsonKey[1];
+        if (language !== 'json') {
+            const json5Key = line.match(/^(\s*[\p{L}_$][\p{L}\p{N}_$.-]*\s*:\s*)/u);
+            return json5Key ? json5Key[1] : null;
+        }
+        return null;
+    }
+
+    if (/^(?:yaml|yml)$/.test(language)) {
+        const yamlKey = allowTightValue
+            ? line.match(
+                /^(\s*(?:-\s*)?(?:(?:"(?:(?:\\.)|[^"\\])*"|'(?:''|[^'])*')|[\p{L}_][\p{L}\p{N}_. -]{0,79})\s*:\s*)/u
+            )
+            : line.match(
+                /^(\s*(?:-\s*)?(?:(?:"(?:(?:\\.)|[^"\\])*"|'(?:''|[^'])*')|[\p{L}_][\p{L}\p{N}_. -]{0,79})\s*:(?:[ \t]+|$))/u
+            );
+        return yamlKey ? yamlKey[1] : null;
+    }
+
+    return null;
 }
 
 // 🚨 문단 구조 자동 복구 (한 덩어리로 합쳐진 경우)

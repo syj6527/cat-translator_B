@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.4 - translator.js
+// 🙀 Translator Beta v1.0.5-beta.5 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
 import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, analyzeLanguage, isClearlyLanguage } from './utils.js';
@@ -362,7 +362,7 @@ export function buildSystemInstruction(settings, options = {}) {
 
     if (options.hasStructure) {
         activeRules.push(
-            'STRUCTURE LOCK: preserve every protected token, tag, macro, code fence, divider, indentation level, blank line, structured key, and block position exactly once and in source order. Translate readable values in place.'
+            'STRUCTURE LOCK: preserve every protected token, tag, macro, code fence, divider, indentation level, blank line, machine-readable YAML/JSON key, and block position exactly once and in source order. Translate readable Markdown/custom-panel labels and values in place.'
         );
     }
 
@@ -507,11 +507,12 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         const cached = await getCached(text, targetLang, modelKey, cacheScopeKey);
         if (cached) {
             const cachedSplit = splitLiteralAppendix(cached.translated);
+            const cachedStructure = validateTranslationStructure(text, cachedSplit.natural);
+            const cachedNatural = cachedStructure.text || cachedSplit.natural;
             const cachedLiteral = cached.literal || cachedSplit.literal;
             const cachedCombined = cachedLiteral
-                ? `${cachedSplit.natural}\n<<<CAT_LITERAL>>>\n${cachedLiteral}`
-                : cachedSplit.natural;
-            const cachedStructure = validateTranslationStructure(text, cachedSplit.natural);
+                ? `${cachedNatural}\n<<<CAT_LITERAL>>>\n${cachedLiteral}`
+                : cachedNatural;
             const cachedValidation = validateTranslationPayload(cachedCombined, text, settings, targetLang);
             const cachedQuality = assessTranslationQuality(cachedCombined, text, settings, targetLang);
             const literalMissing = settings.literalBilingual === 'on' && !cachedLiteral;
@@ -520,7 +521,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (!literalMissing && cachedStructure.ok && cachedValidation.ok && !cachedQualityInvalid) {
                 if (!silent) catNotify(`${getCompletionEmoji()} 캐시 히트! ~${Math.round(text.length * 0.5)} 토큰 절약`, "success");
                 return {
-                    text: cachedSplit.natural,
+                    text: cachedNatural,
                     literal: settings.literalBilingual === 'on' ? cachedLiteral : null,
                     lang: targetLang,
                     fromCache: true
@@ -909,6 +910,13 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             const fallbackStructure = validateTranslationStructure(text, naturalCleaned);
             if (!fallbackStructure.ok) {
                 return await retryRejectedTranslation(fallbackStructure.reason);
+            }
+            if (fallbackStructure.text !== naturalCleaned) {
+                console.log(`[CAT] 🔧 구조 키 ${fallbackStructure.repairedKeys}개 자동 복원`);
+                naturalCleaned = fallbackStructure.text;
+                cleaned = restoredSplit.literal
+                    ? `${naturalCleaned}\n<<<CAT_LITERAL>>>\n${restoredSplit.literal}`
+                    : naturalCleaned;
             }
         }
         
@@ -1335,14 +1343,17 @@ function getInfoBlockValues(text) {
     return [...String(text || '').matchAll(/```([a-zA-Z0-9_-]*)[^\n]*\n([\s\S]*?)```/g)]
         .map((match) => {
             const language = (match[1] || '').toLowerCase();
-            const isInfoBlock = !language || /^(?:ya?ml|json|text|txt|md|markdown|ini|toml)$/.test(language);
+            const isInfoBlock = !language || /^(?:ya?ml|json|text|txt|md|markdown|mb|ini|toml)$/.test(language);
             const values = match[2]
                 .split('\n')
-                .map(line => line
-                    .replace(/^\s*(?:-\s*)?(?:"[^"]+"|\[[^:\]\n]+|[^:\n]{1,80}):\s*/, '')
-                    .replace(/https?:\/\/\S+/g, '')
-                    .replace(/\{\{[\s\S]*?\}\}/g, '')
-                )
+                .map(line => {
+                    const readable = /^(?:ya?ml|json)$/.test(language)
+                        ? line.replace(/^\s*(?:-\s*)?(?:"[^"]+"|[\p{L}_][\p{L}\p{N}_. -]{0,79})\s*:(?:[ \t]+|$)/u, '')
+                        : line;
+                    return readable
+                        .replace(/https?:\/\/\S+/g, '')
+                        .replace(/\{\{[\s\S]*?\}\}/g, '');
+                })
                 .join('\n');
             return { isInfoBlock, values };
         });
@@ -1388,7 +1399,7 @@ export function assemblePrompt(text, targetLang, isToEnglish, settings, options 
 Tokens shaped like @@CATFMT_0000@@ are immutable anchors for code fences, HTML tags, macros, indentation, and code-block line order.
 Keep every token EXACTLY ONCE and in the SAME ORDER. Never translate, rename, duplicate, delete, or move a token.
 Text around the tokens is still human-readable story/info-panel content and MUST be translated.
-For YAML/JSON-like lines, keep keys and punctuation unchanged; translate the readable values.`);
+Only inside fences explicitly marked YAML/JSON, keep machine-readable keys and punctuation unchanged; translate the readable values. Markdown and custom-panel labels are readable text and should be translated.`);
     }
     
     if (retryReason) {
