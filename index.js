@@ -1,11 +1,11 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.5
+// 🙀 Translator Beta v1.0.5-beta.6
 // ============================================================
 import { extension_settings, getContext } from '../../../../scripts/extensions.js';
 import { catNotify, getThemeEmoji, getCompletionEmoji, setTextareaValue, getModelTheme, detectLanguageDirection, getCacheModelKey, buildLiteralDetailsHtml, stripLiteralDetails, analyzeLanguage, isClearlyLanguage, resolveInputTranslationDirection } from './utils.js';
 import { initCache, deleteCached } from './cache.js';
 import { fetchTranslation, gatherContextMessages } from './translator.js';
-import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation } from './ui.js';
+import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation, isTranslatedEditActive, markTranslatedEditSave, clearTranslatedEditSessions } from './ui.js';
 
 const EXT_NAME = "cat-translator-beta";
 const stContext = getContext();
@@ -140,6 +140,9 @@ function resolveAssistantSource(msg) {
 
 function repairAssistantMessageState(msg, msgId, source = '') {
     if (!msg || msg.is_user || msg.is_system === true) return { changed: false, source: null };
+    if (isTranslatedEditActive(msgId, getLiveChat())) {
+        return { changed: false, source: null, deferred: true };
+    }
     const resolved = resolveAssistantSource(msg);
     if (!resolved.text) return { changed: false, source: resolved };
 
@@ -920,6 +923,11 @@ jQuery(async () => {
     // 🚨 메시지 편집 직접 감지 (옵저버 백업) — afterEditMode 'auto'/'notify' 안전 트리거
     stContext.eventSource.on(stContext.event_types.MESSAGE_EDITED, (msgId) => {
         console.log(`[CAT] 🔔 MESSAGE_EDITED 이벤트 수신 #${msgId}`);
+        if (isTranslatedEditActive(msgId, getLiveChat())) {
+            markTranslatedEditSave(msgId, null, getLiveChat());
+            console.log(`[CAT] 🐟 번역문 편집 세션 보호 → 원문 수정 처리 보류 #${msgId}`);
+            return;
+        }
         handleEditSaved(msgId);
     });
     
@@ -940,12 +948,14 @@ jQuery(async () => {
     $(document).on('mousedown touchstart', '.mes_edit_done, .mes_edit_save, .edit_mes_save, [class*="mes_edit_done"]', function () {
         const mesBlock = $(this).closest('.mes');
         const msgId = mesBlock.attr('mesid');
+        const editChatRef = getLiveChat();
         // 가장 최근에 보이는 textarea 즉시 캡처
         const textarea = mesBlock.find('textarea').first();
-        if (textarea.length > 0 && textarea.val()) {
+        if (textarea.length > 0) {
             window._catCapturedText.set(msgId, textarea.val());
             console.log(`[CAT] 📸 mousedown 캡처 #${msgId}: ${textarea.val().substring(0, 40)}...`);
         }
+        markTranslatedEditSave(msgId, textarea.length > 0 ? textarea.val() : null, editChatRef);
     });
     
     // 🚨 ST 저장 체크 버튼(✓) 클릭 직접 감지
@@ -959,10 +969,11 @@ jQuery(async () => {
         let capturedNow = null;
         if ($textarea.length > 0) {
             capturedNow = $textarea.val();
-            if (capturedNow) window._catCapturedText.set(String(msgId), capturedNow);
+            window._catCapturedText.set(String(msgId), capturedNow);
         }
         
         const captured = capturedNow || window._catCapturedText.get(String(msgId));
+        markTranslatedEditSave(msgId, capturedNow ?? captured ?? null, editChatRef);
         window._catCapturedText.delete(String(msgId));
         
         console.log(`[CAT] ✓ 저장 #${msgId} 캡처: ${captured ? captured.substring(0, 50) : '없음'}`);
@@ -978,6 +989,11 @@ jQuery(async () => {
         if (msg.is_user) return;
         if (msg.is_system === true || msg.extra?.media?.length > 0) return;
         if (!msg.extra?.original_mes) return;
+        if (isTranslatedEditActive(id, expectedChatRef)) {
+            markTranslatedEditSave(id, capturedText, expectedChatRef);
+            console.log(`[CAT] 🐟 번역문 편집 저장은 전용 세션에서 처리 #${id}`);
+            return;
+        }
         
         const mode = settings.afterEditMode || 'notify';
         if (mode === 'keep') return;
@@ -1040,6 +1056,7 @@ jQuery(async () => {
     stContext.eventSource.on(stContext.event_types.CHAT_CHANGED, () => {
         abortBulkTranslation();
         cancelPendingTranslationWork('CHAT_CHANGED');
+        clearTranslatedEditSessions();
         setTimeout(() => {
             // 🚨 채팅 로드 시 오염 자동 검사 + 복구 (msg.mes에 한국어가 들어간 경우)
             const ctx = SillyTavern?.getContext?.();
@@ -1100,7 +1117,7 @@ jQuery(async () => {
             setSuppressAutoSave(false);
         }, 500);
     });
-    console.log('[CAT-BETA] 🙀 Translator Beta v1.0.5-beta.5 로드 완료!');
+    console.log('[CAT-BETA] 🙀 Translator Beta v1.0.5-beta.6 로드 완료!');
     
     // 🚨 페이지 가시성 변경 시 60초 이상 stuck 글로우 정리 (모바일 백그라운드 복귀 대응)
     document.addEventListener('visibilitychange', () => {
@@ -1207,6 +1224,7 @@ jQuery(async () => {
             if (!msg.extra?.original_mes) return;
 
             const repaired = repairAssistantMessageState(msg, idx, 'edit poll');
+            if (repaired.deferred) return;
             if (repaired.changed) {
                 stContext.updateMessageBlock(idx, msg);
                 scheduleChatSave(`edit poll repair ${idx}`);

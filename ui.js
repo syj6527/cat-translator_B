@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.5 - ui.js
+// 🙀 Translator Beta v1.0.5-beta.6 - ui.js
 // ============================================================
 import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin } from './cache.js';
@@ -11,6 +11,82 @@ let inputTranslationRequestId = 0;
 let _settingsRef = null;  // 🚨 collectSettings에서 promptPresets/charPresetMap 접근용
 let _suppressAutoSave = false;  // 🚨 프리셋 로드 중 autoSave/스타일핸들러 차단
 let _autoSaveTimer = null;  // 🚨 모듈 스코프로 이동 (CHAT_CHANGED에서 접근 필요)
+const _translatedEditSessions = new Map();
+
+function getTranslatedEditKey(msgId) {
+    const id = Number.parseInt(msgId, 10);
+    return Number.isInteger(id) ? String(id) : null;
+}
+
+export function getTranslatedEditSession(msgId, expectedChatRef = null) {
+    const key = getTranslatedEditKey(msgId);
+    if (key === null) return null;
+    const session = _translatedEditSessions.get(key) || null;
+    if (session && expectedChatRef && session.chatRef !== expectedChatRef) return null;
+    return session;
+}
+
+export function isTranslatedEditActive(msgId, expectedChatRef = null) {
+    return !!getTranslatedEditSession(msgId, expectedChatRef);
+}
+
+export function markTranslatedEditSave(msgId, capturedText, expectedChatRef = null) {
+    const session = getTranslatedEditSession(msgId, expectedChatRef);
+    if (!session) return false;
+    session.saveRequested = true;
+    if (typeof capturedText === 'string') session.capturedText = capturedText;
+    return true;
+}
+
+export function clearTranslatedEditSessions(expectedChatRef = null) {
+    if (!expectedChatRef) {
+        _translatedEditSessions.clear();
+        return;
+    }
+    for (const [key, session] of _translatedEditSessions) {
+        if (session.chatRef === expectedChatRef) _translatedEditSessions.delete(key);
+    }
+}
+
+function beginTranslatedEditSession(msgId, chatRef, messageRef, swipeId, originalText, displayText) {
+    const key = getTranslatedEditKey(msgId);
+    if (key === null) return null;
+    const session = {
+        key,
+        msgId: Number.parseInt(key, 10),
+        chatRef,
+        messageRef,
+        swipeId,
+        originalText,
+        displayText,
+        capturedText: null,
+        saveRequested: false
+    };
+    _translatedEditSessions.set(key, session);
+    return session;
+}
+
+function clearTranslatedEditSession(msgId, expectedSession = null) {
+    const key = getTranslatedEditKey(msgId);
+    if (key === null) return;
+    if (expectedSession && _translatedEditSessions.get(key) !== expectedSession) return;
+    _translatedEditSessions.delete(key);
+}
+
+function getTranslatedEditMessage(session) {
+    const ctx = SillyTavern?.getContext?.();
+    if (!ctx || ctx.chat !== session.chatRef) return null;
+    const message = session.chatRef?.[session.msgId];
+    if (!message || message.swipe_id !== session.swipeId) return null;
+    const sourceStillMatches =
+        message === session.messageRef ||
+        message.extra?.original_mes === session.originalText ||
+        message.mes === session.originalText ||
+        (session.saveRequested &&
+            typeof session.capturedText === 'string' &&
+            message.mes === session.capturedText);
+    return sourceStillMatches ? message : null;
+}
 
 export function abortBulkTranslation() {
     if (bulkAbortController && !bulkAbortController.signal.aborted) {
@@ -673,6 +749,15 @@ function enterTranslatedEdit(mesBlock, msg, msgId) {
     const editMessageRef = msg;
     const savedSwipeId = msg.swipe_id;
     if (!editChatRef || editChatRef[msgId] !== editMessageRef) return;
+    const editSession = beginTranslatedEditSession(
+        msgId,
+        editChatRef,
+        editMessageRef,
+        savedSwipeId,
+        savedOriginal,
+        savedDisplay
+    );
+    if (!editSession) return;
 
     // 🚨 편집 모드 마킹
     mesBlock.data('cat-edit-type', 'translated');
@@ -683,42 +768,50 @@ function enterTranslatedEdit(mesBlock, msg, msgId) {
 
     // textarea 나타난 후 번역문 삽입
     setTimeout(() => {
-        const startCtx = SillyTavern?.getContext?.();
-        if (!startCtx || startCtx.chat !== editChatRef ||
-            editChatRef[msgId] !== editMessageRef || editMessageRef.swipe_id !== savedSwipeId) {
+        const activeMessage = getTranslatedEditMessage(editSession);
+        if (!activeMessage) {
+            clearTranslatedEditSession(msgId, editSession);
             mesBlock.removeData('cat-edit-type').removeData('cat-edit-active').removeData('cat-edit-display').removeData('cat-edit-original');
             return;
         }
         const editArea = mesBlock.find('textarea.edit_textarea:visible, textarea.mes_edit_textarea:visible').first();
         if (!editArea.length) {
+            clearTranslatedEditSession(msgId, editSession);
             mesBlock.removeData('cat-edit-type');
             return;
         }
 
-        setTextareaValue(editArea[0], savedDisplay || msg.mes);
+        editArea.off('input.cattranslatededit').on('input.cattranslatededit', function() {
+            if (_translatedEditSessions.get(editSession.key) === editSession) {
+                editSession.capturedText = $(this).val();
+            }
+        });
+        setTextareaValue(editArea[0], savedDisplay || activeMessage.mes);
         catNotify(`${getCompletionEmoji()} 번역문 편집 모드`, "success");
 
         // 🚨 편집 닫힘 감지
         const _editWatcher = setInterval(() => {
             const ctx = SillyTavern?.getContext?.();
-            if (!ctx || ctx.chat !== editChatRef ||
-                editChatRef[msgId] !== editMessageRef || editMessageRef.swipe_id !== savedSwipeId) {
+            const freshMsg = getTranslatedEditMessage(editSession);
+            if (!ctx || !freshMsg) {
                 clearInterval(_editWatcher);
+                clearTranslatedEditSession(msgId, editSession);
                 mesBlock.removeData('cat-edit-type').removeData('cat-edit-active').removeData('cat-edit-display').removeData('cat-edit-original');
                 return;
             }
             const stillEditing = mesBlock.find('textarea.edit_textarea:visible, textarea.mes_edit_textarea:visible').length > 0;
             if (!stillEditing) {
                 clearInterval(_editWatcher);
-                mesBlock.removeData('cat-edit-type').removeData('cat-edit-active').removeData('cat-edit-display').removeData('cat-edit-original');
-                const freshMsg = editChatRef[msgId];
-                if (!freshMsg || freshMsg !== editMessageRef || freshMsg.swipe_id !== savedSwipeId) return;
-
                 const currentMes = freshMsg.mes;
+                const capturedTranslation = editSession.saveRequested &&
+                    typeof editSession.capturedText === 'string'
+                    ? editSession.capturedText
+                    : currentMes;
+                const translationWasSaved = editSession.saveRequested || currentMes !== savedOriginal;
                 if (!freshMsg.extra) freshMsg.extra = {};
-                if (currentMes !== savedOriginal) {
+                if (translationWasSaved && capturedTranslation !== savedOriginal) {
                     // 번역문 수정 후 저장 → display_text 갱신, 원문 보존
-                    freshMsg.extra.display_text = currentMes;
+                    freshMsg.extra.display_text = capturedTranslation;
                     freshMsg.extra.original_mes = savedOriginal;
                     freshMsg.mes = savedOriginal;
                     console.log(`[CAT] 🐟 번역문 편집 저장 → display_text 갱신, 원문 보존 #${msgId}`);
@@ -738,6 +831,8 @@ function enterTranslatedEdit(mesBlock, msg, msgId) {
                         display_text: freshMsg.extra.display_text
                     };
                 }
+                clearTranslatedEditSession(msgId, editSession);
+                mesBlock.removeData('cat-edit-type').removeData('cat-edit-active').removeData('cat-edit-display').removeData('cat-edit-original');
                 mesBlock.attr('data-cat-translated', 'true');
                 ctx.updateMessageBlock(msgId, freshMsg);
                 try {
@@ -1128,10 +1223,11 @@ export function setupMutationObserver(processMessageFn, revertMessageFn, setting
                     $doneBtn.on('click.catdirect', function() {
                         const directEditChatRef = SillyTavern?.getContext?.()?.chat || stContext.chat;
                         const $ta = mesBlock.find('textarea').first();
-                        if ($ta.length > 0 && $ta.val()) {
+                        if ($ta.length > 0) {
                             window._catCapturedText.set(msgIdStr, $ta.val());
                         }
                         const captured = window._catCapturedText.get(msgIdStr);
+                        markTranslatedEditSave(msgIdStr, captured, directEditChatRef);
                         console.log(`[CAT] ✓ 직접 핸들러 #${msgIdStr} 캡처: ${captured ? captured.substring(0, 50) : '없음'}`);
                         catNotify(`${getThemeEmoji ? getThemeEmoji() : '🐱'} 편집 저장 #${msgIdStr}`, "info");
                         // index.js의 handleEditSaved를 window에서 호출
