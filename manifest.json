@@ -1,8 +1,8 @@
 {
     "name": "cat-translator-beta",
     "display_name": "🙀 Translator Beta",
-    "version": "1.0.5-beta.7",
-    "description": "🙀 Translator Beta 1.0.5-beta.7: 정식판과 분리된 안정성 테스트판",
+    "version": "1.0.5-beta.8",
+    "description": "🙀 Translator Beta 1.0.5-beta.8: 정식판과 분리된 안정성 테스트판",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
     "css": "style.css"

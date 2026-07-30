@@ -550,7 +550,17 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             hasStructure: false
         }
         : protectTranslationStructure(sourceText);
-    const { swapped: preSwapped, matchCount: dictMatchCount } = applyPreReplaceWithCount(structureProtection.text, settings.dictionary, isToEnglish);
+    // 🚨 beta.8: 대사 병기 모드에선 사전 선치환 스킵
+    // 선치환은 원문 자체를 바꾸므로, 병기의 "원문 유지" 라인에 한글 이름이 박혀
+    // 영어 라인·한국어 파트 양쪽에 한글이 이중 노출됨 → 병기 시 사전은 프롬프트 지시로만 전달
+    const dialogueBilingualOn = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
+    const skipPreReplace = dialogueBilingualOn && !isToEnglish;
+    const { swapped: preSwapped, matchCount: dictMatchCount } = skipPreReplace
+        ? { swapped: structureProtection.text, matchCount: 0 }
+        : applyPreReplaceWithCount(structureProtection.text, settings.dictionary, isToEnglish);
+    if (skipPreReplace && settings.dictionary && settings.dictionary.trim()) {
+        console.log('[CAT] 📖 대사 병기 모드 → 사전 선치환 스킵 (프롬프트 GLOSSARY로만 적용)');
+    }
     if (dictMatchCount > 0) {
         console.log(`[CAT] 📖 사전 pre-replace: ${dictMatchCount}개 치환 완료`);
         if (!silent) catNotify(`🐾 사전 ${dictMatchCount}개 단어 치환 적용!`, "success");
@@ -1631,6 +1641,7 @@ Just plain, fully-translated text.
             parts.push(`
 [MATCHED GLOSSARY - ${targetLangName}]
 For each SOURCE=TARGET entry below, use TARGET when SOURCE appears in the current source. Allow only grammatical inflection; do not reverse entries or echo SOURCE in brackets. Translate all other text normally.
+In bilingual output (original line + Korean part): the preserved ORIGINAL line keeps the SOURCE spelling exactly as written; apply TARGET only inside the Korean part. Never let TARGET appear in the original-language line.
 ${matchedLines.join('\n')}`);
         }
     }
@@ -1660,9 +1671,10 @@ ${matchedLines.join('\n')}`);
             .filter(msg => typeof msg === 'object' && msg.voiceText)
             .map(msg => `[${msg.speaker}] ${clipPromptText(msg.voiceText, 320)}`);
         if (voiceReferences.length > 0) {
-            parts.push(`\n[Korean Voice Reference - REGISTER ONLY]
-Use these prior Korean lines only to preserve each speaker's 반말/존댓말, vocabulary, and rhythm.
-Do NOT use them as factual context and do NOT copy their wording.
+            parts.push(`\n[Korean Voice Reference - REGISTER & NAMES]
+Use these prior Korean lines to preserve each speaker's 반말/존댓말, vocabulary register, and rhythm.
+ALSO follow their spelling of proper nouns, character names, and forms of address (호칭) — if a prior line writes a name or title a certain way, keep that exact form. This includes user-corrected lines.
+Do NOT use them as factual context and do NOT copy their sentences or phrasing.
 ${voiceReferences.join('\n')}`);
         }
     }
