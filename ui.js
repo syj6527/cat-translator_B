@@ -1105,6 +1105,8 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     // 맞아 항목이 즉시 실행되던 문제. 생성 직후 400ms 동안 항목 클릭 무시
     const popupOpenedAt = Date.now();
     const ghostGuard = () => Date.now() - popupOpenedAt < 400;
+    // 🚨 beta.14: 팝업이 닫히는 모든 경로에서 버튼 글로우 정리 (안 끄면 60초까지 계속 돎)
+    const stopAnchorGlow = () => anchorEl.find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
     
     const rect = anchorEl[0].getBoundingClientRect();
     const popupWidth = 280;
@@ -1124,13 +1126,14 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     
     $('body').append(popup);
 
-    popup.find('.cat-history-text').on('click', function () { if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); onSelect(text, false); popup.remove(); });
-    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey); });
+    popup.find('.cat-history-text').on('click', function () { if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); stopAnchorGlow(); onSelect(text, false); popup.remove(); });
+    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey, prevDisplay); });
     
     let newTransBusy = false;
     popup.find('.cat-history-prev').on('click', function() {
         if (ghostGuard()) return;
         const prevText = decodeURIComponent($(this).attr('data-text') || '');
+        stopAnchorGlow();
         popup.remove();
         if (prevText) onSelect(prevText, false);
     });
@@ -1146,6 +1149,7 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     setTimeout(() => {
         $(document).on('click.catHistoryClose touchstart.catHistoryClose', (e) => {
             if (!$(e.target).closest('.cat-history-popup').length) {
+                stopAnchorGlow();
                 popup.remove();
                 $(document).off('click.catHistoryClose touchstart.catHistoryClose');
             }
