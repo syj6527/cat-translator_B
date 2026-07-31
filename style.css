@@ -371,3 +371,20 @@ button.cat-edit-history-restore,
     color: inherit !important;
     border-radius: 0 !important;
 }
+
+/* beta.16 — 히스토리 팝업: 더보기/개별 삭제 */
+.cat-history-item .cat-history-del {
+    margin-left: 6px;
+    opacity: 0.4;
+    cursor: pointer;
+    font-size: 0.85em;
+    padding: 2px 4px;
+}
+.cat-history-item .cat-history-del:hover { opacity: 0.9; color: #e05555; }
+.cat-history-item.cat-history-more {
+    text-align: center;
+    opacity: 0.6;
+    font-size: 0.88em;
+    cursor: pointer;
+}
+.cat-history-item.cat-history-more:hover { opacity: 0.9; }

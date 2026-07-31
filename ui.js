@@ -2,7 +2,7 @@
 // 🙀 Translator Beta v1.0.5-beta.7 - ui.js
 // ============================================================
 import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection } from './utils.js';
-import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin } from './cache.js';
+import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin, deleteHistoryItem } from './cache.js';
 import { fetchTranslation, gatherContextMessages, SYSTEM_SHIELD, STYLE_PRESETS, getLastDebugLog } from './translator.js';
 
 let bulkAbortController = null;
@@ -732,6 +732,7 @@ export function injectMessageButtons(processMessageFn, revertMessageFn) {
             const openPopup = $('.cat-history-popup');
             if (openPopup.length) {
                 openPopup.remove();
+                $(document).off('click.catHistoryClose touchstart.catHistoryClose');
                 $(this).find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
                 return;
             }
@@ -1086,11 +1087,21 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     // 번역은 "새로 번역"을 명시적으로 눌러야만 시작 (히스토리 보려다 재번역 시작되던 문제 해결)
     const showHistoryItems = history.length >= 1;
 
-    const sorted = [...history].sort((a, b) => { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return b.time - a.time; }).slice(0, 5);
-    let items = showHistoryItems ? sorted.map((h, i) => {
+    const sorted = [...history].sort((a, b) => { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return b.time - a.time; }).slice(0, 15);
+    const renderItem = (h, i, hidden) => {
         const pinClass = h.pinned ? 'cat-pinned' : ''; const pinIcon = h.pinned ? '📌' : '📍'; const truncated = h.text.length > 80 ? h.text.substring(0, 80) + '...' : h.text;
-        return `<div class="cat-history-item ${pinClass}" data-idx="${i}"><span class="cat-history-text" data-text="${encodeURIComponent(h.text)}">${truncated}</span><span class="cat-history-pin" data-text="${encodeURIComponent(h.text)}">${pinIcon}</span></div>`;
-    }).join('') : '';
+        return `<div class="cat-history-item ${pinClass}${hidden ? ' cat-history-hidden' : ''}" data-idx="${i}"${hidden ? ' style="display:none;"' : ''}><span class="cat-history-text" data-text="${encodeURIComponent(h.text)}">${truncated}</span><span class="cat-history-pin" data-text="${encodeURIComponent(h.text)}">${pinIcon}</span><span class="cat-history-del" data-text="${encodeURIComponent(h.text)}" title="이 번역 삭제">✕</span></div>`;
+    };
+    // 🚨 beta.16: 프리뷰 3개 + 나머지는 더보기로 접기
+    let items = '';
+    if (showHistoryItems) {
+        items = sorted.slice(0, 3).map((h, i) => renderItem(h, i, false)).join('');
+        const hiddenPart = sorted.slice(3);
+        if (hiddenPart.length > 0) {
+            items += hiddenPart.map((h, i) => renderItem(h, i + 3, true)).join('');
+            items += `<div class="cat-history-item cat-history-more">▾ 지난 번역 ${hiddenPart.length}개 더보기</div>`;
+        }
+    }
     // 🚨 beta.9: 직전 번역 복귀 항목 — 최상단 고정
     if (prevDisplay) {
         const prevTrunc = prevDisplay.length > 80 ? prevDisplay.substring(0, 80) + '...' : prevDisplay;
@@ -1106,6 +1117,9 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     const ghostGuard = () => Date.now() - popupOpenedAt < 400;
     // 🚨 beta.14: 팝업이 닫히는 모든 경로에서 버튼 글로우 정리 (안 끄면 60초까지 계속 돎)
     const stopAnchorGlow = () => anchorEl.find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
+    // 🚨 beta.16: 팝업 제거 시 document 닫기 핸들러도 반드시 해제 — 잔존하면 다음 탭의
+    // touchstart를 가로채 글로우를 먼저 꺼버려 "번역 중단"이 통째로 무력화됨
+    const closePopup = () => { popup.remove(); $(document).off('click.catHistoryClose touchstart.catHistoryClose'); };
     
     const rect = anchorEl[0].getBoundingClientRect();
     const popupWidth = 280;
@@ -1126,15 +1140,30 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     $('body').append(popup);
     stopAnchorGlow();
 
-    popup.find('.cat-history-text').on('click', function () { if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); stopAnchorGlow(); onSelect(text, false); popup.remove(); });
-    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey, prevDisplay); });
+    popup.find('.cat-history-text').on('click', function () { if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); stopAnchorGlow(); onSelect(text, false); closePopup(); });
+    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); closePopup(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey, prevDisplay); });
     
     let newTransBusy = false;
+    // 🚨 beta.16: 더보기 — 숨긴 항목 펼치기
+    popup.find('.cat-history-more').on('click', function() {
+        if (ghostGuard()) return;
+        popup.find('.cat-history-hidden').show();
+        $(this).remove();
+    });
+    // 🚨 beta.16: 항목 개별 삭제 (✕)
+    popup.find('.cat-history-del').on('click', async function (e) {
+        e.stopPropagation();
+        if (ghostGuard()) return;
+        const text = decodeURIComponent($(this).data('text'));
+        await deleteHistoryItem(originalText, targetLang, text, modelKey);
+        closePopup();
+        showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey, prevDisplay);
+    });
     popup.find('.cat-history-prev').on('click', function() {
         if (ghostGuard()) return;
         const prevText = decodeURIComponent($(this).attr('data-text') || '');
         stopAnchorGlow();
-        popup.remove();
+        closePopup();
         if (prevText) onSelect(prevText, false);
     });
     popup.find('.cat-history-new').on('click', () => {
@@ -1143,15 +1172,19 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
         newTransBusy = true;
         catNotify(`${getThemeEmoji()} 새로운 번역 생성 중...`, "success");
         onSelect(null, true);
-        popup.remove();
+        closePopup();
     });
 
     setTimeout(() => {
         $(document).on('click.catHistoryClose touchstart.catHistoryClose', (e) => {
+            // 팝업이 이미 사라졌으면 (새로 번역 등) 글로우 건드리지 말고 핸들러만 해제
+            if (!$('.cat-history-popup').length) {
+                $(document).off('click.catHistoryClose touchstart.catHistoryClose');
+                return;
+            }
             if (!$(e.target).closest('.cat-history-popup').length) {
                 stopAnchorGlow();
-                popup.remove();
-                $(document).off('click.catHistoryClose touchstart.catHistoryClose');
+                closePopup();
             }
         });
     }, 500);

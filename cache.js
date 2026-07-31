@@ -135,6 +135,15 @@ export async function setCached(originalText, targetLang, translated, thought = 
         if (!history.some(h => h.text === translated)) {
             history.push({ text: translated, time: Date.now(), pinned: false });
         }
+        // 🚨 beta.16: 무한 누적 방지 — 비고정 항목 최근 20개만 유지 (📌핀은 무제한)
+        const unpinnedCount = history.filter(h => !h.pinned).length;
+        if (unpinnedCount > 20) {
+            let toDrop = unpinnedCount - 20;
+            for (let i = 0; i < history.length && toDrop > 0; ) {
+                if (!history[i].pinned) { history.splice(i, 1); toDrop--; }
+                else i++;
+            }
+        }
 
         const entry = {
             key,
@@ -181,6 +190,21 @@ export async function togglePin(originalText, targetLang, translationText, model
                 item.pinned = !item.pinned;
                 await promisifyRequest(store.put(result));
             }
+        }
+    } catch (e) { /* 무시 */ }
+}
+
+// ─── 히스토리 개별 삭제 (beta.16) ────────────────────
+export async function deleteHistoryItem(originalText, targetLang, translationText, modelKey = 'default') {
+    if (!db) return;
+    const key = buildCacheKey(originalText, targetLang, modelKey);
+    try {
+        const tx = db.transaction(STORE_TRANSLATIONS, 'readwrite');
+        const store = tx.objectStore(STORE_TRANSLATIONS);
+        const result = await promisifyRequest(store.get(key));
+        if (result && result.history) {
+            result.history = result.history.filter(h => h.text !== translationText);
+            await promisifyRequest(store.put(result));
         }
     } catch (e) { /* 무시 */ }
 }
