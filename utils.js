@@ -244,8 +244,24 @@ export function protectTranslationStructure(text) {
         namespace,
         tokens,
         expectedMarkers,
+        // 🚨 beta.9: 마커 사이 구간별 텍스트 유무 패턴 — 복원 시 대조해 "블록 경계를 넘는 밀림" 감지
+        segmentPattern: computeSegmentPattern(protectedText, expectedMarkers),
         hasStructure: expectedMarkers.length > 0
     };
+}
+
+// 마커 순서대로 텍스트를 잘라 각 구간에 실제 내용(문자·숫자)이 있는지 boolean 배열로
+export function computeSegmentPattern(text, markers) {
+    const pattern = [];
+    let rest = String(text || '');
+    for (const marker of markers) {
+        const idx = rest.indexOf(marker);
+        if (idx < 0) { pattern.push(/[가-힣a-zA-Z0-9]/.test(rest)); return pattern; }
+        pattern.push(/[가-힣a-zA-Z0-9]/.test(rest.slice(0, idx)));
+        rest = rest.slice(idx + marker.length);
+    }
+    pattern.push(/[가-힣a-zA-Z0-9]/.test(rest));
+    return pattern;
 }
 
 function escapeRegExp(text) {
@@ -350,6 +366,19 @@ export function restoreTranslationStructure(text, protection) {
     const outputMarkers = output.match(markerPattern) || [];
     if (outputMarkers.length !== protection.expectedMarkers.length) {
         return { ok: false, text: null, reason: '알 수 없는 구조 토큰이 추가되었거나 삭제됨' };
+    }
+    
+    // 🚨 beta.9: 세그먼트 패턴 대조 — 마커 순서가 맞아도 텍스트가 블록 경계를 넘어
+    // 이동하면(예: 상태창 앞 대사가 상태창 뒤로 밀림) 원문에서 비어있던 구간에
+    // 내용이 생기거나 내용 있던 구간이 비게 됨 → 밀림으로 판정해 거부 (재시도 유도)
+    if (Array.isArray(protection.segmentPattern)) {
+        const outPattern = computeSegmentPattern(output, protection.expectedMarkers);
+        for (let i = 0; i < protection.segmentPattern.length; i++) {
+            if (protection.segmentPattern[i] !== outPattern[i]) {
+                const kind = protection.segmentPattern[i] ? '구간 내용 소실' : '빈 구간에 텍스트 침입';
+                return { ok: false, text: null, reason: `텍스트가 블록 경계를 넘어 이동함 (${kind}, 구간 ${i})` };
+            }
+        }
     }
     
     let restored = output;

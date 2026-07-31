@@ -723,7 +723,21 @@ export function injectMessageButtons(processMessageFn, revertMessageFn) {
     if (vis === 'hide-message') { $('.cat-btn-group').addClass('cat-hidden'); }
     if (!window._catMesBtnDelegated) {
         window._catMesBtnDelegated = true;
-        $(document).on('click', '.cat-mes-trans-btn', function (e) { e.stopPropagation(); const msgId = $(this).data('mesid') || $(this).closest('.mes').attr('mesid'); const isUser = $(this).closest('.mes').hasClass('mes_user'); if (msgId !== undefined) processMessageFn(msgId, isUser); });
+        $(document).on('click', '.cat-mes-trans-btn', function (e) {
+            e.stopPropagation();
+            const msgId = $(this).data('mesid') || $(this).closest('.mes').attr('mesid');
+            const isUser = $(this).closest('.mes').hasClass('mes_user');
+            if (msgId === undefined) return;
+            // 🚨 beta.9: 번역 진행 중 재탭 = 중단 (수동/자동 공통)
+            if ($(this).find('.cat-emoji-icon').hasClass('cat-glow-anim') && typeof window.__catAbortTranslation === 'function') {
+                if (window.__catAbortTranslation(msgId)) {
+                    catNotify('🔴 번역을 중단했어요.', 'error');
+                    $(this).find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
+                    return;
+                }
+            }
+            processMessageFn(msgId, isUser);
+        });
         $(document).on('click', '.cat-mes-revert-btn', function (e) { e.stopPropagation(); const msgId = $(this).data('mesid') || $(this).closest('.mes').attr('mesid'); if (msgId !== undefined) revertMessageFn(msgId); });
         // 🚨 🐟/🍖 클릭 → 바로 번역문 편집 모드 진입
         $(document).on('click', '.cat-mes-edit-btn', function (e) {
@@ -1058,16 +1072,23 @@ async function executeBulkTranslation(count, settings, stContext, processMessage
     if (bulkAbortController === controller) bulkAbortController = null;
 }
 
-export async function showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey = 'default') {
+export async function showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey = 'default', prevDisplay = null) {
     $('.cat-history-popup').remove();
     const history = await getHistory(originalText, targetLang, modelKey);
-    if (history.length < 3) return false;
+    // 🚨 beta.9: 히스토리 3회 규칙은 유지하되, 직전 번역이 있으면 그것만으로도 팝업 표시
+    if (history.length < 3 && !prevDisplay) return false;
+    const showHistoryItems = history.length >= 3;
 
     const sorted = [...history].sort((a, b) => { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return b.time - a.time; }).slice(0, 5);
-    let items = sorted.map((h, i) => {
+    let items = showHistoryItems ? sorted.map((h, i) => {
         const pinClass = h.pinned ? 'cat-pinned' : ''; const pinIcon = h.pinned ? '📌' : '📍'; const truncated = h.text.length > 80 ? h.text.substring(0, 80) + '...' : h.text;
         return `<div class="cat-history-item ${pinClass}" data-idx="${i}"><span class="cat-history-text" data-text="${encodeURIComponent(h.text)}">${truncated}</span><span class="cat-history-pin" data-text="${encodeURIComponent(h.text)}">${pinIcon}</span></div>`;
-    }).join('');
+    }).join('') : '';
+    // 🚨 beta.9: 직전 번역 복귀 항목 — 최상단 고정
+    if (prevDisplay) {
+        const prevTrunc = prevDisplay.length > 80 ? prevDisplay.substring(0, 80) + '...' : prevDisplay;
+        items = `<div class="cat-history-item cat-history-prev" data-text="${encodeURIComponent(prevDisplay)}">↩️ 직전 번역: <span class="cat-history-prev-preview">${$('<span>').text(prevTrunc).html()}</span></div>` + items;
+    }
     items += `<div class="cat-history-item cat-history-new">🔄 새로 번역</div>`;
 
     const popup = $(`<div class="cat-history-popup">${items}</div>`);
@@ -1094,6 +1115,11 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey); });
     
     let newTransBusy = false;
+    popup.find('.cat-history-prev').on('click', function() {
+        const prevText = decodeURIComponent($(this).attr('data-text') || '');
+        popup.remove();
+        if (prevText) onSelect(prevText, false);
+    });
     popup.find('.cat-history-new').on('click', () => {
         if (newTransBusy) return;
         newTransBusy = true;

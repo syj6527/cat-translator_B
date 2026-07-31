@@ -255,6 +255,17 @@ function saveSettings(updateBaseline = false) {
     applyTheme(getCurrentTheme()); updateCacheStats();
 }
 
+// 🚨 beta.9: 진행 중 번역 중단 레지스트리 — 번역 중 버튼 재탭 = 중단
+const _activeTranslationAborts = new Map();
+
+export function abortMessageTranslation(msgId) {
+    const ctrl = _activeTranslationAborts.get(parseInt(msgId, 10));
+    if (ctrl && !ctrl.signal.aborted) { ctrl.abort(); return true; }
+    return false;
+}
+// ui.js와의 순환 import 회피용 브릿지
+if (typeof window !== 'undefined') window.__catAbortTranslation = abortMessageTranslation;
+
 async function processMessage(id, isInput = false, abortSignal = null, silent = false, isAutoEvent = false) {
     const msgId = parseInt(id, 10);
     const processChatRef = getLiveChat();
@@ -350,6 +361,14 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
     // 🚨 글로우 안전장치: 60초 후 자동 해제 (에러로 stuck 방지)
     const glowTimeout = setTimeout(() => { stopGlow(); console.warn(`[CAT] ⚠️ 글로우 타임아웃 #${msgId}`); }, 60000);
     let historyShown = false;
+    // 🚨 beta.9: 외부 signal(벌크 등) 없으면 자체 중단 컨트롤러 생성 — 수동/자동 모두 버튼 탭으로 중단 가능
+    // (isAutoTriggered 판정·조기 return 이후 시점에 등록해 레지스트리 누수 방지)
+    let _ownAbortCtrl = null;
+    if (!abortSignal) {
+        _ownAbortCtrl = new AbortController();
+        abortSignal = _ownAbortCtrl.signal;
+        _activeTranslationAborts.set(msgId, _ownAbortCtrl);
+    }
 
     try {
         const editArea = mesBlock.find('textarea.edit_textarea:visible, textarea.mes_edit_textarea:visible').first();
@@ -407,6 +426,9 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
             const anchorEl = mesBlock.find('.cat-mes-trans-btn');
             const detected = detectDir(textToTranslate);
             const modelKey = getCacheModelKey(settings);
+            // 🚨 beta.9: 직전 번역이 있고 현재 표시본과 다르면 팝업에 복귀 항목 제공
+            const prevDisplayForPopup = (msg.extra?.cat_prev_display && msg.extra.cat_prev_display !== msg.extra?.display_text)
+                ? msg.extra.cat_prev_display : null;
             const shown = await showHistoryPopup(textToTranslate, detected.targetLang, anchorEl, async (selectedText, isNew) => {
                 if (isNew) {
                     if (getLiveChat() !== processChatRef) {
@@ -414,9 +436,15 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
                         return;
                     }
                     startGlow();
+                    // 🚨 beta.9: 팝업 경유 번역도 중단 가능하게 별도 컨트롤러 등록
+                    const popupCtrl = new AbortController();
+                    _activeTranslationAborts.set(msgId, popupCtrl);
                     try {
-                        await doTranslateMessage(msgId, msg, textToTranslate, isInput, existingTranslation, abortSignal, true, false, processChatRef);
-                    } finally { stopGlow(); }
+                        await doTranslateMessage(msgId, msg, textToTranslate, isInput, existingTranslation, popupCtrl.signal, true, false, processChatRef);
+                    } finally {
+                        stopGlow();
+                        if (_activeTranslationAborts.get(msgId) === popupCtrl) _activeTranslationAborts.delete(msgId);
+                    }
                 } else if (selectedText) {
                     if (getLiveChat() !== processChatRef) {
                         console.warn(`[CAT] ⏭️ 채팅 전환으로 번역 히스토리 적용 취소 #${msgId}`);
@@ -435,6 +463,10 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
                     }
                     if (!freshMsg.extra) freshMsg.extra = {};
                     freshMsg.extra.original_mes = textToTranslate;
+                    // 🚨 beta.9: 히스토리/직전 번역 적용 시에도 현재 번역 백업 (토글 왕복)
+                    if (freshMsg.extra.display_text && freshMsg.extra.display_text !== selectedText) {
+                        freshMsg.extra.cat_prev_display = freshMsg.extra.display_text;
+                    }
                     freshMsg.extra.display_text = selectedText;
                     if (isInput) freshMsg.mes = selectedText;
                     else freshMsg.mes = textToTranslate;
@@ -458,11 +490,15 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
                         chatRef: processChatRef
                     });
                 }
-            }, modelKey);
+            }, modelKey, prevDisplayForPopup);
             if (shown) { historyShown = true; return; }
         }
         await doTranslateMessage(msgId, msg, textToTranslate, isInput, existingTranslation, abortSignal, silent, false, processChatRef);
-    } finally { clearTimeout(glowTimeout); if (!historyShown) stopGlow(); }
+    } finally {
+        clearTimeout(glowTimeout); if (!historyShown) stopGlow();
+        // 🚨 beta.9: 중단 레지스트리 정리 (자체 생성분만)
+        if (_ownAbortCtrl && _activeTranslationAborts.get(msgId) === _ownAbortCtrl) _activeTranslationAborts.delete(msgId);
+    }
 }
 
 async function doTranslateMessage(msgId, msg, textToTranslate, isInput, prevTranslation, abortSignal, silent = false, forceFresh = false, requestChatRef = getLiveChat()) {
@@ -545,6 +581,10 @@ async function doTranslateMessage(msgId, msg, textToTranslate, isInput, prevTran
 
         if (!freshMsg.extra) freshMsg.extra = {};
         freshMsg.extra.original_mes = textToTranslate;
+        // 🚨 beta.9: 직전 번역 백업 — 재번역으로 덮어쓰기 전 현재 번역문 보존 (↩️ 직전 번역 복귀용)
+        if (freshMsg.extra.display_text && freshMsg.extra.display_text !== result.text) {
+            freshMsg.extra.cat_prev_display = freshMsg.extra.display_text;
+        }
         // 🚨 직역 병기: 직역 파트가 있으면 자연번역 아래 접이식 details 블록 합성 (인풋 제외)
         let displayWithLiteral = result.text;
         if (result.literal && !isInput) {

@@ -686,6 +686,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (settings.literalBilingual === 'on') baseMaxTokens = Math.min(baseMaxTokens * 2, 32768);
             
             for (let attempt = 0; attempt < MAX_PROFILE_RETRIES; attempt++) {
+                // 🚨 beta.9: 중단 요청 시 프로필 모드는 재시도 진입 전 즉시 종료
+                if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 시도 전)'); return null; }
                 try {
                     // 🚨 재시도 시 토큰 증량 (thinking 모델이 토큰 부족으로 빈 응답 주는 케이스 대응)
                     // attempt 0: 기본값, attempt 1: 2배, attempt 2: 4배 (최대 32768)
@@ -695,6 +697,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                     }
                     
                     const response = await stContext.ConnectionManagerRequestService.sendRequest(settings.profile, [{ role: "user", content: fullPrompt }], attemptMaxTokens);
+                    // 🚨 beta.9: 프로필 요청은 도중 취소가 불가 → 도착한 결과를 폐기하는 방식으로 중단 처리
+                    if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); return null; }
                     
                     // 🚨 응답 필드 다양화 시도 (ST가 reasoning_content / content / text 등 다양한 형식 반환 가능)
                     if (typeof response === 'string') {
