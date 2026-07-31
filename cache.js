@@ -224,7 +224,11 @@ async function cleanExpired() {
 
 // ─── 설정 내보내기/가져오기 ─────────────────────────
 export function exportSettings(settings) {
-    const data = JSON.stringify(settings, null, 2);
+    // 🚨 beta.10: API 키·자격증명은 내보내기에서 제외 — 설정 공유 시 키 유출 방지
+    const SENSITIVE_KEYS = ['customKey', 'vertexKey'];
+    const sanitized = { ...settings };
+    for (const k of SENSITIVE_KEYS) delete sanitized[k];
+    const data = JSON.stringify(sanitized, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

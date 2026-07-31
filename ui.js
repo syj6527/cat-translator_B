@@ -729,10 +729,19 @@ export function injectMessageButtons(processMessageFn, revertMessageFn) {
             const isUser = $(this).closest('.mes').hasClass('mes_user');
             if (msgId === undefined) return;
             // 🚨 beta.9: 번역 진행 중 재탭 = 중단 (수동/자동 공통)
-            if ($(this).find('.cat-emoji-icon').hasClass('cat-glow-anim') && typeof window.__catAbortTranslation === 'function') {
-                if (window.__catAbortTranslation(msgId)) {
+            if ($(this).find('.cat-emoji-icon').hasClass('cat-glow-anim')) {
+                if (typeof window.__catAbortTranslation === 'function' && window.__catAbortTranslation(msgId)) {
                     catNotify('🔴 번역을 중단했어요.', 'error');
                     $(this).find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
+                    return;
+                }
+                // 🚨 beta.11: 재번역 팝업이 열린 대기 상태에서 재탭 = 팝업 닫기(취소)
+                // (팝업 대기 중엔 컨트롤러가 없어 위 중단이 false → 기존엔 조용히 무시되던 사각지대)
+                const openPopup = $('.cat-history-popup');
+                if (openPopup.length) {
+                    openPopup.remove();
+                    $(this).find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
+                    catNotify('🔴 재번역을 취소했어요.', 'error');
                     return;
                 }
             }
@@ -1092,6 +1101,10 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     items += `<div class="cat-history-item cat-history-new">🔄 새로 번역</div>`;
 
     const popup = $(`<div class="cat-history-popup">${items}</div>`);
+    // 🚨 beta.12: 모바일 고스트 클릭 방어 — 팝업이 여는 탭의 합성 click(~300ms 지연)에
+    // 맞아 항목이 즉시 실행되던 문제. 생성 직후 400ms 동안 항목 클릭 무시
+    const popupOpenedAt = Date.now();
+    const ghostGuard = () => Date.now() - popupOpenedAt < 400;
     
     const rect = anchorEl[0].getBoundingClientRect();
     const popupWidth = 280;
@@ -1111,16 +1124,18 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     
     $('body').append(popup);
 
-    popup.find('.cat-history-text').on('click', function () { const text = decodeURIComponent($(this).data('text')); onSelect(text, false); popup.remove(); });
-    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey); });
+    popup.find('.cat-history-text').on('click', function () { if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); onSelect(text, false); popup.remove(); });
+    popup.find('.cat-history-pin').on('click', async function (e) { e.stopPropagation(); if (ghostGuard()) return; const text = decodeURIComponent($(this).data('text')); await togglePin(originalText, targetLang, text, modelKey); popup.remove(); showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey); });
     
     let newTransBusy = false;
     popup.find('.cat-history-prev').on('click', function() {
+        if (ghostGuard()) return;
         const prevText = decodeURIComponent($(this).attr('data-text') || '');
         popup.remove();
         if (prevText) onSelect(prevText, false);
     });
     popup.find('.cat-history-new').on('click', () => {
+        if (ghostGuard()) return;
         if (newTransBusy) return;
         newTransBusy = true;
         catNotify(`${getThemeEmoji()} 새로운 번역 생성 중...`, "success");

@@ -315,6 +315,7 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
             delete msg.extra.original_mes;
             delete msg.extra.display_text;
             delete msg.extra.cat_literal;
+            delete msg.extra.cat_prev_display;
             delete msg.extra.cat_swipe_id;
             mesBlock.removeAttr('data-cat-translated');
             stContext.updateMessageBlock(msgId, msg);
@@ -834,6 +835,7 @@ function revertMessage(id) {
     if (editArea.length > 0) { const originalText = editArea.data('cat-original-text'); if (originalText) { setTextareaValue(editArea[0], originalText); editArea.removeData('cat-original-text').removeData('cat-last-translated').removeData('cat-last-target-lang'); catNotify(`${getThemeEmoji()} 원본 텍스트로 복구 완료!`, "success"); } else { catNotify("⚠️ 복구할 원본이 없습니다.", "warning"); } return; }
     if (msg.extra?.display_text) delete msg.extra.display_text;
     if (msg.extra?.cat_literal) delete msg.extra.cat_literal;
+            delete msg.extra.cat_prev_display;
     if (msg.extra?.original_mes) {
         // 🚨 입력 메시지는 msg.mes가 번역문이므로 원문 복원 필요
         // 출력 메시지는 msg.mes가 이미 원문이므로 덮어써도 동일
@@ -1071,6 +1073,7 @@ jQuery(async () => {
         if (mode === 'auto') {
             delete msg.extra.display_text;
             delete msg.extra.cat_literal;
+            delete msg.extra.cat_prev_display;
             if (msg.extra.swipe_translations && msg.swipe_id !== undefined) {
                 delete msg.extra.swipe_translations[msg.swipe_id];
             }
@@ -1292,6 +1295,7 @@ jQuery(async () => {
             if (mode === 'auto') {
                 delete msg.extra.display_text;
                 delete msg.extra.cat_literal;
+            delete msg.extra.cat_prev_display;
                 // 🚨 swipe_translations에서도 현재 swipe 삭제 (restoreSwipeTranslations 차단)
                 if (msg.extra.swipe_translations && msg.swipe_id !== undefined) {
                     delete msg.extra.swipe_translations[msg.swipe_id];
