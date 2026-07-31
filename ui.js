@@ -892,7 +892,7 @@ function showDebugPopup() {
             <div class="cat-debug-body">
             <div style="background:rgba(255,100,100,0.1); border:1px solid rgba(255,100,100,0.3); border-radius:8px; padding:10px; margin-bottom:10px;">
                 <div style="font-weight:bold; margin-bottom:4px;">📌 에러 정보</div>
-                <div style="font-size:0.85em; opacity:0.8;">시각: ${ts}<br>에러: ${error}<br>복구: ${recovery}</div>
+                <div style="font-size:0.85em; opacity:0.8;">시각: ${ts}<br>에러: ${String(error).replace(/</g, '&lt;').replace(/>/g, '&gt;')}<br>복구: ${String(recovery).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
             </div>
             <div style="background:rgba(100,180,255,0.1); border:1px solid rgba(100,180,255,0.3); border-radius:8px; padding:10px; margin-bottom:10px;">
                 <div style="font-weight:bold; margin-bottom:4px;">🔑 API 호출 상태</div>
@@ -1090,7 +1090,7 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     const sorted = [...history].sort((a, b) => { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return b.time - a.time; }).slice(0, 15);
     const renderItem = (h, i, hidden) => {
         const pinClass = h.pinned ? 'cat-pinned' : ''; const pinIcon = h.pinned ? '📌' : '📍'; const truncated = h.text.length > 80 ? h.text.substring(0, 80) + '...' : h.text;
-        return `<div class="cat-history-item ${pinClass}${hidden ? ' cat-history-hidden' : ''}" data-idx="${i}"${hidden ? ' style="display:none;"' : ''}><span class="cat-history-text" data-text="${encodeURIComponent(h.text)}">${truncated}</span><span class="cat-history-pin" data-text="${encodeURIComponent(h.text)}">${pinIcon}</span><span class="cat-history-del" data-text="${encodeURIComponent(h.text)}" title="이 번역 삭제">✕</span></div>`;
+        return `<div class="cat-history-item ${pinClass}${hidden ? ' cat-history-hidden' : ''}" data-idx="${i}"${hidden ? ' style="display:none;"' : ''}><span class="cat-history-text" data-text="${encodeURIComponent(h.text)}">${escapePopupHtml(truncated)}</span><span class="cat-history-pin" data-text="${encodeURIComponent(h.text)}">${pinIcon}</span><span class="cat-history-del" data-text="${encodeURIComponent(h.text)}" title="이 번역 삭제">✕</span></div>`;
     };
     // 🚨 beta.16: 프리뷰 3개 + 나머지는 더보기로 접기
     let items = '';
@@ -1117,6 +1117,8 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     const ghostGuard = () => Date.now() - popupOpenedAt < 400;
     // 🚨 beta.14: 팝업이 닫히는 모든 경로에서 버튼 글로우 정리 (안 끄면 60초까지 계속 돎)
     const stopAnchorGlow = () => anchorEl.find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
+    // 🚨 v1.1.0 보안: 번역문(모델 출력)을 HTML로 삽입하기 전 이스케이프 — 팝업은 DOMPurify 미경유라 필수
+    const escapePopupHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     // 🚨 beta.16: 팝업 제거 시 document 닫기 핸들러도 반드시 해제 — 잔존하면 다음 탭의
     // touchstart를 가로채 글로우를 먼저 꺼버려 "번역 중단"이 통째로 무력화됨
     const closePopup = () => { popup.remove(); $(document).off('click.catHistoryClose touchstart.catHistoryClose'); };
