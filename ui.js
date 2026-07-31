@@ -1084,9 +1084,9 @@ async function executeBulkTranslation(count, settings, stContext, processMessage
 export async function showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey = 'default', prevDisplay = null) {
     $('.cat-history-popup').remove();
     const history = await getHistory(originalText, targetLang, modelKey);
-    // 🚨 beta.9: 히스토리 3회 규칙은 유지하되, 직전 번역이 있으면 그것만으로도 팝업 표시
-    if (history.length < 3 && !prevDisplay) return false;
-    const showHistoryItems = history.length >= 3;
+    // 🚨 beta.13: 재번역 탭 = 무조건 팝업 — 히스토리가 적어도(0~2개) 팝업을 띄우고,
+    // 번역은 "새로 번역"을 명시적으로 눌러야만 시작 (히스토리 보려다 재번역 시작되던 문제 해결)
+    const showHistoryItems = history.length >= 1;
 
     const sorted = [...history].sort((a, b) => { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return b.time - a.time; }).slice(0, 5);
     let items = showHistoryItems ? sorted.map((h, i) => {

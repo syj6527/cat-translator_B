@@ -423,7 +423,8 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
             catNotify(`${getThemeEmoji()} ${prefix} 진행 중...`, "success");
         }
 
-        if (isRetranslation) {
+        // 🚨 beta.13: 팝업은 유저 버튼 탭에서만 — 벌크(외부 signal)/자동(isAutoEvent)/silent 경로는 기존대로 직행
+        if (isRetranslation && !silent && !isAutoEvent && _ownAbortCtrl) {
             const anchorEl = mesBlock.find('.cat-mes-trans-btn');
             const detected = detectDir(textToTranslate);
             const modelKey = getCacheModelKey(settings);
