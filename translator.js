@@ -1196,6 +1196,57 @@ function postProcessBilingualText(text, bilingualMode) {
     });
 }
 
+function collectQuotedSegmentsOutsideFences(text) {
+    const source = String(text || '');
+    const masked = source.replace(/```[^\n]*\n[\s\S]*?```/g, match => ' '.repeat(match.length));
+    const patterns = [
+        { type: 'double', regex: /"([^"]*)"/g },
+        { type: 'curly', regex: /“([^”]*)”/g },
+        { type: 'corner', regex: /「([^」]*)」/g },
+        { type: 'white-corner', regex: /『([^』]*)』/g }
+    ];
+    const segments = [];
+    for (const { type, regex } of patterns) {
+        for (const match of masked.matchAll(regex)) {
+            segments.push({ type, content: match[1], index: match.index });
+        }
+    }
+    return segments.sort((a, b) => a.index - b.index);
+}
+
+function validateKoEnBilingualDialogue(original, output) {
+    const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
+        .filter(item =>
+            /[A-Za-z]/.test(item.content) &&
+            !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content)
+        );
+    if (sourceDialogues.length === 0) return { ok: true, reason: null };
+
+    const outputDialogues = collectQuotedSegmentsOutsideFences(output);
+    let outputIndex = 0;
+    for (let i = 0; i < sourceDialogues.length; i++) {
+        const sourceDialogue = sourceDialogues[i];
+        let matched = false;
+        for (; outputIndex < outputDialogues.length; outputIndex++) {
+            const candidate = outputDialogues[outputIndex];
+            if (candidate.type !== sourceDialogue.type) continue;
+            const bilingual = candidate.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
+            if (!bilingual) continue;
+            if (bilingual[1].trim() !== sourceDialogue.content.trim()) continue;
+            matched = true;
+            outputIndex++;
+            break;
+        }
+        if (!matched) {
+            return {
+                ok: false,
+                reason: `한영 병기 구조 붕괴: 영어 원문 대사 또는 같은 따옴표 안의 한국어 병기 누락 (대사 ${i + 1})`
+            };
+        }
+    }
+    return { ok: true, reason: null };
+}
+
 function transformOutsideFencedBlocks(text, transform) {
     const source = String(text || '');
     const fencePattern = /```[^\n]*\n[\s\S]*?```/g;
@@ -1245,6 +1296,11 @@ export function validateTranslationPayload(output, originalText, settings, targe
         if (!sourceAlreadyBilingual && leakedBilingual) {
             return { ok: false, reason: '일반 번역에 대사 병기 형식이 섞임' };
         }
+    }
+
+    if ((settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean') {
+        const bilingualValidation = validateKoEnBilingualDialogue(original, natural);
+        if (!bilingualValidation.ok) return bilingualValidation;
     }
     
     const sourceStructure = countOutputStructure(original);

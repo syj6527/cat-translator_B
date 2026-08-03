@@ -7,7 +7,7 @@ import { initCache, deleteCached } from './cache.js';
 import { fetchTranslation, gatherContextMessages } from './translator.js';
 import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation, isTranslatedEditActive, markTranslatedEditSave, clearTranslatedEditSessions } from './ui.js';
 
-const EXT_NAME = "cat-translator";
+const EXT_NAME = "cat-translator-beta";
 const stContext = getContext();
 
 const defaultSettings = { profile: '', customKey: '', vertexKey: '', vertexProject: '', vertexRegion: 'global', directModel: 'gemini-2.5-flash', customModelName: '', autoMode: 'none', bidirectional: 'off', dialogueBilingual: 'off', literalBilingual: 'off', iconVisibility: 'all', targetLang: 'Korean', style: 'normal', temperature: 0.3, maxTokens: 8192, contextRange: 1, userPrompt: '', dictionary: '', retranslateStrength: 'normal', afterEditMode: 'notify', previewTranslate: 'off', previewCleanup: 'off', promptPresets: {}, charPresetMap: {} };
@@ -883,10 +883,6 @@ function revertMessage(id) {
 function detectDir(text) { return detectLanguageDirection(text, settings); }
 
 async function findEnabledStableTranslator() {
-    // 🚨 정식판 빌드: 이 가드는 베타 전용 (자기 자신을 감지해 자멸하므로 무력화)
-    // 동시설치 시엔 베타 쪽이 스스로 로드를 양보함
-    return null;
-    // eslint-disable-next-line no-unreachable
     try {
         const extensionsModule = await import('../../../../scripts/extensions.js');
         const extensionNames = Array.isArray(extensionsModule.extensionNames)
