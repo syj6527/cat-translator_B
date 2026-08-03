@@ -1,11 +1,11 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.7 - cache.js
+// 🐱 Translator v1.1.0 - cache.js
 // IndexedDB 영구 캐시: 유사 문장 매칭, Thought 캐싱, 통계
 // ============================================================
 
 import { normalizeText } from './utils.js';
 
-const DB_NAME = 'CatTranslatorBetaCache';
+const DB_NAME = 'CatTranslatorCache';
 const DB_VERSION = 2;
 const STORE_TRANSLATIONS = 'translations';
 const STORE_STATS = 'stats';
@@ -258,7 +258,7 @@ export function exportSettings(settings) {
     const a = document.createElement('a');
     a.href = url;
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    a.download = `cat-translator-beta-settings-${date}.json`;
+    a.download = `cat-translator-settings-${date}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

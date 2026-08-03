@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.7
+// 🐱 Translator v1.1.0
 // ============================================================
 import { extension_settings, getContext } from '../../../../scripts/extensions.js';
 import { catNotify, getThemeEmoji, getCompletionEmoji, setTextareaValue, getModelTheme, detectLanguageDirection, getCacheModelKey, buildLiteralDetailsHtml, stripLiteralDetails, analyzeLanguage, isClearlyLanguage, resolveInputTranslationDirection } from './utils.js';
@@ -7,7 +7,7 @@ import { initCache, deleteCached } from './cache.js';
 import { fetchTranslation, gatherContextMessages } from './translator.js';
 import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation, isTranslatedEditActive, markTranslatedEditSave, clearTranslatedEditSessions } from './ui.js';
 
-const EXT_NAME = "cat-translator-beta";
+const EXT_NAME = "cat-translator";
 const stContext = getContext();
 
 const defaultSettings = { profile: '', customKey: '', vertexKey: '', vertexProject: '', vertexRegion: 'global', directModel: 'gemini-2.5-flash', customModelName: '', autoMode: 'none', bidirectional: 'off', dialogueBilingual: 'off', literalBilingual: 'off', iconVisibility: 'all', targetLang: 'Korean', style: 'normal', temperature: 0.3, maxTokens: 8192, contextRange: 1, userPrompt: '', dictionary: '', retranslateStrength: 'normal', afterEditMode: 'notify', previewTranslate: 'off', previewCleanup: 'off', promptPresets: {}, charPresetMap: {} };
@@ -883,6 +883,10 @@ function revertMessage(id) {
 function detectDir(text) { return detectLanguageDirection(text, settings); }
 
 async function findEnabledStableTranslator() {
+    // 🚨 정식판 빌드: 이 가드는 베타 전용 (자기 자신을 감지해 자멸하므로 무력화)
+    // 동시설치 시엔 베타 쪽이 스스로 로드를 양보함
+    return null;
+    // eslint-disable-next-line no-unreachable
     try {
         const extensionsModule = await import('../../../../scripts/extensions.js');
         const extensionNames = Array.isArray(extensionsModule.extensionNames)
@@ -914,7 +918,7 @@ async function findEnabledStableTranslator() {
             }
         }
     } catch (e) {
-        console.warn('[CAT-BETA] 정식판 활성 상태 확인 실패:', e);
+        console.warn('[CAT] 정식판 활성 상태 확인 실패:', e);
     }
 
     return $('#cat-trans-container').length > 0
@@ -925,12 +929,12 @@ async function findEnabledStableTranslator() {
 jQuery(async () => {
     const stableTranslator = await findEnabledStableTranslator();
     if (stableTranslator) {
-        console.error(`[CAT-BETA] ${stableTranslator.displayName} 활성 감지 → 베타 로드 중단`);
+        console.error(`[CAT] ${stableTranslator.displayName} 활성 감지 → 베타 로드 중단`);
         catNotify('🙀 정식판과 베타가 모두 켜져 있어 베타를 중단했어요. 둘 중 하나만 활성화해주세요.', 'warning');
         return;
     }
 
-    try { await initCache(); console.log('[CAT-BETA] 🙀 IndexedDB 캐시 초기화 완료'); } catch (e) { console.warn('[CAT-BETA] IndexedDB 초기화 실패, 메모리 캐시로 대체:', e); }
+    try { await initCache(); console.log('[CAT] 🐱 IndexedDB 캐시 초기화 완료'); } catch (e) { console.warn('[CAT] IndexedDB 초기화 실패, 메모리 캐시로 대체:', e); }
     setupSettingsPanel(settings, stContext, saveSettings); setupDragDictionary(settings, saveSettings); setupMutationObserver(processMessage, revertMessage, settings, stContext);
     // 🚨 첫 마이그레이션 / baseline 리셋 안내
     if (!_baselineValid) {
@@ -953,14 +957,12 @@ jQuery(async () => {
             processMessage(msgId, false, null, false, true);
         }, 500);
     });
-    stContext.eventSource.on(stContext.event_types.USER_MESSAGE_RENDERED, (d) => {
+    stContext.eventSource.on(stContext.event_types.USER_MESSAGE_RENDERED, async (d) => {
         if (settings.autoMode === 'none' || settings.autoMode === 'output') return;
         const msgId = typeof d === 'object' ? d.messageId : d;
         const renderedChatRef = getLiveChat();
-        setTimeout(() => {
-            if (getLiveChat() !== renderedChatRef) return;
-            processMessage(msgId, true, null, false, true);
-        }, 500);
+        if (getLiveChat() !== renderedChatRef) return;
+        await processMessage(msgId, true, null, false, true);
     });
     
     // 🚨 메시지 편집 직접 감지 (옵저버 백업) — afterEditMode 'auto'/'notify' 안전 트리거
@@ -1161,7 +1163,7 @@ jQuery(async () => {
             setSuppressAutoSave(false);
         }, 500);
     });
-    console.log('[CAT-BETA] 🙀 Translator Beta v1.0.5-beta.7 로드 완료!');
+    console.log('[CAT] 🐱 Translator v1.1.0 로드 완료!');
     
     // 🚨 페이지 가시성 변경 시 60초 이상 stuck 글로우 정리 (모바일 백그라운드 복귀 대응)
     document.addEventListener('visibilitychange', () => {

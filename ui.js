@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.7 - ui.js
+// 🐱 Translator v1.1.0 - ui.js
 // ============================================================
 import { catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin, deleteHistoryItem } from './cache.js';
@@ -126,7 +126,7 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
     const html = `
     <div id="cat-trans-container" class="inline-drawer">
         <div id="cat-drawer-header" class="inline-drawer-header interactable" tabindex="0">
-            <div class="inline-drawer-title"><span class="cat-beta-brand-emoji">🙀</span><span>Translator Beta</span></div>
+            <div class="inline-drawer-title"><span class="cat-beta-brand-emoji">🐱</span><span>Translator</span></div>
             <i id="cat-drawer-toggle" class="inline-drawer-toggle fa-fw fa-solid fa-circle-chevron-down inline-drawer-icon down interactable"></i>
         </div>
         <div id="cat-drawer-content" class="inline-drawer-content" style="display:none; padding:10px;">
@@ -642,7 +642,7 @@ export function injectInputButtons(settings, stContext, processMessageFn) {
                 const liveChat = SillyTavern?.getContext?.()?.chat || stContext.chat;
                 const latestInput = sendArea.val().trim();
                 if (requestId !== inputTranslationRequestId || liveChat !== requestChatRef || latestInput !== currentText) {
-                    console.warn('[CAT-BETA] ⏭️ 입력 번역 중 채팅/입력 변경 → 낡은 결과 폐기');
+                    console.warn('[CAT] ⏭️ 입력 번역 중 채팅/입력 변경 → 낡은 결과 폐기');
                     catNotify(`${getThemeEmoji()} 입력 내용이 바뀌어서 이전 번역 결과를 적용하지 않았어요.`, "warning");
                     return;
                 }
@@ -886,7 +886,7 @@ function showDebugPopup() {
     <dialog class="cat-debug-overlay" style="background:rgba(0,0,0,0.6); z-index:2147483647; display:none;">
         <div class="cat-debug-modal" style="background:var(--SmartThemeBodyColor, #222); color:var(--SmartThemeEmColor, #fff);">
             <div class="cat-debug-header">
-                <div class="cat-debug-title" style="font-size:1.1em; font-weight:bold;">🙀 Beta 마지막 LLM 응답 / 에러 로그</div>
+                <div class="cat-debug-title" style="font-size:1.1em; font-weight:bold;">🐱 마지막 LLM 응답 / 에러 로그</div>
                 <span class="cat-debug-close" style="cursor:pointer; font-size:1.5em; opacity:0.6; padding:4px 8px;">✕</span>
             </div>
             <div class="cat-debug-body">
@@ -961,7 +961,7 @@ function showDebugPopup() {
     overlay.find('.cat-debug-close').on('click', closeOverlay);
     overlay.on('click', (e) => { if ($(e.target).hasClass('cat-debug-overlay')) closeOverlay(); });
     overlay.find('.cat-debug-copy').on('click', () => {
-        const copyText = `[🙀 Translator Beta 디버그 로그]\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
+        const copyText = `[🐱 Translator 디버그 로그]\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
         navigator.clipboard.writeText(copyText).then(() => catNotify('📋 디버그 로그 복사 완료!', 'success')).catch(() => catNotify('복사 실패 — 수동으로 복사해주세요', 'warning'));
     });
 }
@@ -1081,6 +1081,9 @@ async function executeBulkTranslation(count, settings, stContext, processMessage
 }
 
 export async function showHistoryPopup(originalText, targetLang, anchorEl, onSelect, modelKey = 'default', prevDisplay = null) {
+    // 🚨 v1.1.0 보안: 번역문(모델 출력)을 HTML 삽입 전 이스케이프 — 팝업은 DOMPurify 미경유라 필수
+    // (반드시 함수 최상단: renderItem이 아래에서 즉시 호출하므로 늦게 선언하면 TDZ ReferenceError로 팝업 전체가 죽음)
+    const escapePopupHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     $('.cat-history-popup').remove();
     const history = await getHistory(originalText, targetLang, modelKey);
     // 🚨 beta.13: 재번역 탭 = 무조건 팝업 — 히스토리가 적어도(0~2개) 팝업을 띄우고,
@@ -1117,8 +1120,6 @@ export async function showHistoryPopup(originalText, targetLang, anchorEl, onSel
     const ghostGuard = () => Date.now() - popupOpenedAt < 400;
     // 🚨 beta.14: 팝업이 닫히는 모든 경로에서 버튼 글로우 정리 (안 끄면 60초까지 계속 돎)
     const stopAnchorGlow = () => anchorEl.find('.cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
-    // 🚨 v1.1.0 보안: 번역문(모델 출력)을 HTML로 삽입하기 전 이스케이프 — 팝업은 DOMPurify 미경유라 필수
-    const escapePopupHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     // 🚨 beta.16: 팝업 제거 시 document 닫기 핸들러도 반드시 해제 — 잔존하면 다음 탭의
     // touchstart를 가로채 글로우를 먼저 꺼버려 "번역 중단"이 통째로 무력화됨
     const closePopup = () => { popup.remove(); $(document).off('click.catHistoryClose touchstart.catHistoryClose'); };

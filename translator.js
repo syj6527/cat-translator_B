@@ -1,5 +1,5 @@
 // ============================================================
-// 🙀 Translator Beta v1.0.5-beta.7 - translator.js
+// 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
 import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, analyzeLanguage, isClearlyLanguage } from './utils.js';
@@ -44,6 +44,7 @@ NEVER write phrases like:
 - "Let me translate this..."
 Your reasoning belongs in the thinking field (if available), NEVER in the response body.
 Output starts IMMEDIATELY with the translated text. No preamble. No introduction. No conclusion.
+Never wrap your output in \`\`\` code fences. If the source has no code fences, your output must have none.
 
 [NO CITATION / REFERENCE MARKERS - CRITICAL]
 NEVER append citation-style markers like [1], [3], [5] to sentences in your output.
@@ -349,8 +350,11 @@ export function buildSystemInstruction(settings, options = {}) {
     if (dialogueMode === 'off') {
         activeRules.push('Dialogue bilingual mode is OFF. Do not retain source-language dialogue or add translation brackets.');
     } else {
-        activeRules.push('Dialogue bilingual mode is ON. Source text may be retained ONLY inside quoted dialogue, followed by one target-language translation block inside the same quote.');
-        activeRules.push('Narration remains target-language only.');
+        activeRules.push('Dialogue bilingual mode is ON. Format: "English dialogue. [한국어 번역.]" — the [bracket] goes INSIDE the same quotation marks, immediately after the English.');
+        activeRules.push('Narration (everything outside quotes) is Korean ONLY. Never keep English narration, and never output narration twice (English then Korean = FAILURE).');
+        activeRules.push('WRONG: "I am not a heater, [나 온풍기 아니야,]" Peter muttered, picking up the fork. 그는 포크를 들며 중얼거렸다. ← narration duplicated');
+        activeRules.push('WRONG: "I am not a heater" "[나 온풍기 아니야]" ← bracket outside the quotes');
+        activeRules.push('CORRECT: "I am not a heater. [나 온풍기 아니야.]" 그가 포크를 들며 중얼거렸다.');
     }
     
     if (literalMode) {
@@ -882,6 +886,22 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         }
 
         let cleaned = cleanResult(result, text, structureProtection);
+        
+        // 🚨 v1.1.1: 모델 장식 펜스 회수 — 원문에 \`\`\`가 0개인데 응답에 있으면
+        // 그 펜스는 100% 모델이 멋대로 감싼 장식 (인풋 번역에서 특히 빈발)
+        // → 거부 대신 펜스 마커만 벗겨 살림 (내용 유지). 원문에 펜스가 있으면 절대 미적용
+        if (cleaned && !/```/.test(text) && /```/.test(cleaned)) {
+            const stripped = cleaned
+                .replace(/^```[a-zA-Z]*\s*$/gm, '')
+                .replace(/```/g, '')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+            if (stripped) {
+                console.log('[CAT] 🧹 모델 장식 펜스 제거 (원문 펜스 0개 → 응답 펜스 전량 제거)');
+                cleaned = stripped;
+            }
+        }
+        
         if (!cleaned || !cleaned.trim()) {
             const refused = result && /검색을 수행해야|cannot perform|cannot provide|작업을 수행할 수 없|사용자 사양을 준수/i.test(result);
             const finalMessage = refused
@@ -1159,6 +1179,8 @@ function postProcessBilingualText(text, bilingualMode) {
                 console.log('[CAT] 🔄 병기 역순 감지 → 자동 교정');
                 return `"${eng.trim()} [${kor.trim()}]${rest}"`;
             });
+            // 🚨 v1.1.2: "영어" "[한국어]" 분리 출력 병합 (괄호가 별도 따옴표로 밀려난 케이스)
+            processed = processed.replace(/"([^"]*[A-Za-z][^"]*)"\s*"\[([^\]]*[가-힣][^\]]*)\]"/g, '"$1 [$2]"');
             processed = processed.replace(/"([^"]*?)"\s*\[([^\]]+)\]/g, '"$1 [$2]"');
             processed = processed.replace(/\."\s*\[/g, '. [');
             return processed;
@@ -1260,6 +1282,16 @@ export function assessTranslationQuality(output, originalText, settings, targetL
     const sourceAnalysis = analyzeLanguage(source);
     const outputAnalysis = analyzeLanguage(qualityText);
     const dialogueBilingual = (settings.dialogueBilingual || 'off') !== 'off';
+
+    // 🚨 v1.1.2: 병기 모드에서 서술이 영어로 남거나(미번역) 영어+한국어 이중 출력되면
+    // 따옴표 밖 영단어가 급증 → 감지해 재시도 (고유명사 몇 개로는 문턱 미달)
+    if (dialogueBilingual && targetLang === 'Korean') {
+        const outsideQuotes = natural.replace(/"[^"]*"/g, '').replace(/「[^」]*」/g, '').replace(/『[^』]*』/g, '');
+        const engWordsOutside = (outsideQuotes.match(/\b[a-zA-Z]{3,}\b/g) || []).length;
+        if (engWordsOutside > 10) {
+            addIssue(`병기 서술 미번역/이중 출력 의심 (따옴표 밖 영단어 ${engWordsOutside}개)`, 40);
+        }
+    }
 
     if (source.trim() === natural.trim() &&
         !isClearlyLanguage(sourceAnalysis, targetLang, 0.78)) {
