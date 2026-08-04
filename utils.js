@@ -337,23 +337,92 @@ function normalizeProtectedStructureResponse(text, protection) {
     return normalized;
 }
 
-export function restoreTranslationStructure(text, protection) {
+function collapseBilingualMacroCopiesInQuote(content) {
+    const bilingual = String(content || '').match(/^([\s\S]*?)\s+\[([\s\S]*)\]\s*$/);
+    if (!bilingual) return content;
+
+    const originalPart = bilingual[1];
+    const translationPart = bilingual[2];
+    if (!/[가-힣]/.test(translationPart)) return content;
+    const copyPattern = /\{\{[\s\S]*?\}\}|@@[A-Za-z0-9_]+_\d{4}@@/g;
+    const availableCopies = new Map();
+    for (const match of originalPart.matchAll(copyPattern)) {
+        availableCopies.set(match[0], (availableCopies.get(match[0]) || 0) + 1);
+    }
+    if (availableCopies.size === 0) return content;
+
+    let collapsedCopies = 0;
+    const unmatchedTranslation = translationPart.replace(copyPattern, (token) => {
+        const remaining = availableCopies.get(token) || 0;
+        if (remaining < 1) return token;
+        availableCopies.set(token, remaining - 1);
+        collapsedCopies++;
+        return '';
+    });
+    if (collapsedCopies === 0) return content;
+
+    // 비교용 문자열에서 병기 번역문 자체는 제외하되, 허용 대상이 아닌 구조 요소는
+    // 남겨서 실제 태그/매크로 추가나 중복이 검증을 우회하지 못하게 한다.
+    const residualStructure = unmatchedTranslation.match(
+        /```[^\n]*|<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|@@[A-Za-z0-9_]+_\d{4}@@/g
+    ) || [];
+    return originalPart + residualStructure.join('');
+}
+
+// 한영병기 대사 안에서 동일 매크로가 영어 원문과 한국어 번역에 한 번씩 필요한
+// 경우만 구조 비교상 하나로 센다. 실제 출력은 변경하지 않는다.
+export function normalizeBilingualMacroCopiesForValidation(text) {
+    const normalizeQuotes = (segment) => {
+        let normalized = segment;
+        const quotePatterns = [
+            { regex: /"([^"]*)"/g, open: '"', close: '"' },
+            { regex: /“([^”]*)”/g, open: '“', close: '”' },
+            { regex: /「([^」]*)」/g, open: '「', close: '」' },
+            { regex: /『([^』]*)』/g, open: '『', close: '』' }
+        ];
+        for (const { regex, open, close } of quotePatterns) {
+            normalized = normalized.replace(
+                regex,
+                (match, content) => open + collapseBilingualMacroCopiesInQuote(content) + close
+            );
+        }
+        return normalized;
+    };
+
+    const source = String(text || '');
+    const tagPattern = /<\/?[a-zA-Z][^>]*>/g;
+    let normalized = '';
+    let lastIndex = 0;
+    for (const tag of source.matchAll(tagPattern)) {
+        normalized += normalizeQuotes(source.slice(lastIndex, tag.index));
+        normalized += tag[0];
+        lastIndex = tag.index + tag[0].length;
+    }
+    normalized += normalizeQuotes(source.slice(lastIndex));
+    return normalized;
+}
+
+export function restoreTranslationStructure(text, protection, options = {}) {
     if (!protection?.hasStructure) {
         return { ok: true, text: String(text || ''), reason: null };
     }
     
     const rawOutput = String(text || '');
     const output = normalizeProtectedStructureResponse(rawOutput, protection);
+    const allowBilingualMacroCopies = options.allowBilingualMacroCopies === true;
+    const validationOutput = allowBilingualMacroCopies
+        ? normalizeBilingualMacroCopiesForValidation(output)
+        : output;
     if (output !== rawOutput) {
         console.log('[CAT] 🔧 모델별 구조 토큰 표기 차이 자동 복구');
     }
     let previousIndex = -1;
     for (const marker of protection.expectedMarkers) {
-        const firstIndex = output.indexOf(marker);
+        const firstIndex = validationOutput.indexOf(marker);
         if (firstIndex < 0) {
             return { ok: false, text: null, reason: `구조 토큰 누락: ${marker}` };
         }
-        if (output.indexOf(marker, firstIndex + marker.length) >= 0) {
+        if (validationOutput.indexOf(marker, firstIndex + marker.length) >= 0) {
             return { ok: false, text: null, reason: `구조 토큰 중복: ${marker}` };
         }
         if (firstIndex <= previousIndex) {
@@ -363,7 +432,7 @@ export function restoreTranslationStructure(text, protection) {
     }
     
     const markerPattern = new RegExp(`@@${protection.namespace}_\\d{4}@@`, 'g');
-    const outputMarkers = output.match(markerPattern) || [];
+    const outputMarkers = validationOutput.match(markerPattern) || [];
     if (outputMarkers.length !== protection.expectedMarkers.length) {
         return { ok: false, text: null, reason: '알 수 없는 구조 토큰이 추가되었거나 삭제됨' };
     }
@@ -372,7 +441,7 @@ export function restoreTranslationStructure(text, protection) {
     // 이동하면(예: 상태창 앞 대사가 상태창 뒤로 밀림) 원문에서 비어있던 구간에
     // 내용이 생기거나 내용 있던 구간이 비게 됨 → 밀림으로 판정해 거부 (재시도 유도)
     if (Array.isArray(protection.segmentPattern)) {
-        const outPattern = computeSegmentPattern(output, protection.expectedMarkers);
+        const outPattern = computeSegmentPattern(validationOutput, protection.expectedMarkers);
         for (let i = 0; i < protection.segmentPattern.length; i++) {
             if (protection.segmentPattern[i] !== outPattern[i]) {
                 const kind = protection.segmentPattern[i] ? '구간 내용 소실' : '빈 구간에 텍스트 침입';
@@ -383,10 +452,13 @@ export function restoreTranslationStructure(text, protection) {
     
     let restored = output;
     for (const token of protection.tokens) {
-        restored = restored.replace(token.marker, token.value);
+        const isMacro = /^\{\{[\s\S]*?\}\}$/.test(token.value);
+        restored = allowBilingualMacroCopies && isMacro
+            ? restored.split(token.marker).join(token.value)
+            : restored.replace(token.marker, token.value);
     }
 
-    const validation = validateTranslationStructure(protection.source, restored);
+    const validation = validateTranslationStructure(protection.source, restored, options);
     if (validation.repairedKeys > 0) {
         console.log(`[CAT] 🔧 구조 키 ${validation.repairedKeys}개 자동 복원`);
     }
@@ -418,10 +490,13 @@ export function restoreTranslationTokens(text, protection) {
     return { ok: true, text: restored, reason: null };
 }
 
-export function validateTranslationStructure(source, output) {
+export function validateTranslationStructure(source, output, options = {}) {
     const sourceText = String(source || '');
     const normalized = repairStructuredKeyPrefixes(sourceText, String(output || ''));
-    const parity = compareProtectedStructure(sourceText, normalized.text);
+    const validationText = options.allowBilingualMacroCopies === true
+        ? normalizeBilingualMacroCopiesForValidation(normalized.text)
+        : normalized.text;
+    const parity = compareProtectedStructure(sourceText, validationText);
     if (!parity.ok) {
         const recovered = recoverBoundaryContextLeak(sourceText, normalized.text);
         if (recovered) {

@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
-import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, analyzeLanguage, isClearlyLanguage } from './utils.js';
+import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
 import { deleteCached, getCached, setCached } from './cache.js';
 
 const LEGACY_SYSTEM_SHIELD = `[ABSOLUTE DIRECTIVE - VIOLATION = FAILURE]
@@ -488,6 +488,10 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         const detected = detectLanguageDirection(text, settings);
         isToEnglish = detected.isToEnglish; targetLang = detected.targetLang;
     }
+    const structureValidationOptions = {
+        allowBilingualMacroCopies:
+            (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean'
+    };
 
     // 메타 토큰을 제외한 주 언어가 목표 언어라고 확실할 때만 같은 언어로 판정한다.
     const bilingualActive = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
@@ -511,7 +515,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         const cached = await getCached(text, targetLang, modelKey, cacheScopeKey);
         if (cached) {
             const cachedSplit = splitLiteralAppendix(cached.translated);
-            const cachedStructure = validateTranslationStructure(text, cachedSplit.natural);
+            const cachedStructure = validateTranslationStructure(text, cachedSplit.natural, structureValidationOptions);
             if (cachedStructure.boundaryRecovery) {
                 console.warn('[CAT] 🧹 캐시의 이전 문맥 경계 코드블럭 제거 후 구조 검증 통과');
             }
@@ -677,7 +681,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
             
             _lastDebugLog.mode = '프로필';
-            _lastDebugLog.model = settings.profile.substring(0, 20) + '...';
+            _lastDebugLog.model = '비공개';
             _lastDebugLog.prompt = fullPrompt;
             
             // 🚨 프로필 모드 빈 응답 재시도 (Gemini 3.5/3.0 Flash thinking 대응)
@@ -869,7 +873,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             
             const fetchBody = { systemInstruction: { parts: [{ text: activeSystemInstruction }] }, contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig, safetySettings: SAFETY_SETTINGS };
             _lastDebugLog.mode = '직접 연결';
-            _lastDebugLog.model = actualModel;
+            _lastDebugLog.model = '비공개';
             _lastDebugLog.prompt = prompt;
             console.log(`[CAT] 🧠 Direct 모드: systemInstruction 분리 | 모델: ${actualModel} | temp: ${temperature} | maxTokens: ${maxTokens}`);
             
@@ -916,7 +920,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 return await retryRejectedTranslation('직역 병기 마커 또는 직역 본문 누락');
             }
             
-            const naturalRestored = restoreTranslationStructure(initialLiteralSplit.natural, structureProtection);
+            const naturalRestored = restoreTranslationStructure(initialLiteralSplit.natural, structureProtection, structureValidationOptions);
             if (!naturalRestored.ok) {
                 return await retryRejectedTranslation(naturalRestored.reason);
             }
@@ -930,7 +934,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (initialLiteralSplit.literal && !/CAT_LITERAL/i.test(text)) {
                 return await retryRejectedTranslation('일반 번역에 직역 병기 파트가 섞임');
             }
-            const restored = restoreTranslationStructure(cleaned, structureProtection);
+            const restored = restoreTranslationStructure(cleaned, structureProtection, structureValidationOptions);
             if (!restored.ok) {
                 return await retryRejectedTranslation(restored.reason);
             }
@@ -957,7 +961,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             : naturalCleaned;
 
         if (_structureFallback) {
-            const fallbackStructure = validateTranslationStructure(text, naturalCleaned);
+            const fallbackStructure = validateTranslationStructure(text, naturalCleaned, structureValidationOptions);
             if (!fallbackStructure.ok) {
                 return await retryRejectedTranslation(fallbackStructure.reason);
             }
@@ -1198,7 +1202,9 @@ function postProcessBilingualText(text, bilingualMode) {
 
 function collectQuotedSegmentsOutsideFences(text) {
     const source = String(text || '');
-    const masked = source.replace(/```[^\n]*\n[\s\S]*?```/g, match => ' '.repeat(match.length));
+    const masked = source
+        .replace(/```[^\n]*\n[\s\S]*?```/g, match => ' '.repeat(match.length))
+        .replace(/<\/?[a-zA-Z][^>]*>/g, match => ' '.repeat(match.length));
     const patterns = [
         { type: 'double', regex: /"([^"]*)"/g },
         { type: 'curly', regex: /“([^”]*)”/g },
@@ -1304,7 +1310,11 @@ export function validateTranslationPayload(output, originalText, settings, targe
     }
     
     const sourceStructure = countOutputStructure(original);
-    const outputStructure = countOutputStructure(natural);
+    const structureCheckedNatural =
+        (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean'
+            ? normalizeBilingualMacroCopiesForValidation(natural)
+            : natural;
+    const outputStructure = countOutputStructure(structureCheckedNatural);
     if (sourceStructure.fences !== outputStructure.fences ||
         sourceStructure.tags !== outputStructure.tags ||
         sourceStructure.rules !== outputStructure.rules) {
