@@ -250,6 +250,42 @@ export function protectTranslationStructure(text) {
     };
 }
 
+// 🚨 beta.3 디버그: 렌더링으로는 구분 불가능한 특수 문장부호에 코드포인트를 병기
+// (커리 아포스트로피 ’ vs ' 같은 한 글자 차이가 원격 로그에서 보이도록)
+export function revealSpecialChars(value) {
+    return String(value || '').replace(
+        /[\u2018\u2019\u201C\u201D\u2013\u2014\u2026\u00A0\u3000]/g,
+        (ch) => `${ch}⟨U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`
+    );
+}
+
+// 🚨 beta.3 디버그: 특정 위치 앞뒤 문맥 발췌 (제어문자 가시화 포함)
+function snippetAround(text, index, length, radius = 50) {
+    const source = String(text || '');
+    const start = Math.max(0, index - radius);
+    const end = Math.min(source.length, index + length + radius);
+    return `${start > 0 ? '…' : ''}${source.slice(start, end)}${end < source.length ? '…' : ''}`;
+}
+
+// 🚨 beta.3: computeSegmentPattern과 동일한 순차 indexOf 워크로 i번째 구간의 실제 텍스트를 추출
+// (구간 i = 마커 i-1 뒤 ~ 마커 i 앞. i=0은 첫 마커 앞, i=markers.length는 마지막 마커 뒤)
+function getSegmentByMarkers(text, markers, targetIndex) {
+    let rest = String(text || '');
+    for (let i = 0; i < markers.length; i++) {
+        const idx = rest.indexOf(markers[i]);
+        if (idx < 0) return i === targetIndex ? rest : '';
+        if (i === targetIndex) return rest.slice(0, idx);
+        rest = rest.slice(idx + markers[i].length);
+    }
+    return targetIndex === markers.length ? rest : '';
+}
+
+// 🚨 beta.3: "직전 토큰에 공백 없이 붙은 짧은 한국어 꼬리"인지 판정 (조사+서술어 SOV 이동분)
+// 첫 글자가 한글이어야 함 = 앞 토큰에 조사로 직결. 공백/줄바꿈으로 시작하면 진짜 밀림이므로 불허.
+function isKoreanTailSegment(segment) {
+    return /^[가-힣][가-힣\s,.!?…~'’"”-]{0,39}$/.test(String(segment || ''));
+}
+
 // 마커 순서대로 텍스트를 잘라 각 구간에 실제 내용(문자·숫자)이 있는지 boolean 배열로
 export function computeSegmentPattern(text, markers) {
     const pattern = [];
@@ -345,17 +381,21 @@ function collapseBilingualMacroCopiesInQuote(content) {
     const translationPart = bilingual[2];
     if (!/[가-힣]/.test(translationPart)) return content;
     const copyPattern = /\{\{[\s\S]*?\}\}|@@[A-Za-z0-9_]+_\d{4}@@/g;
+    // 🚨 beta.3: 병기 복사본 대조를 소문자 키로 — 원문 {{User}} / 번역 파트 {{user}}처럼
+    // 대소문자만 다르게 복사돼도 같은 매크로의 복사본으로 인정 (구조 토큰은 고정 표기라 무영향)
     const availableCopies = new Map();
     for (const match of originalPart.matchAll(copyPattern)) {
-        availableCopies.set(match[0], (availableCopies.get(match[0]) || 0) + 1);
+        const key = match[0].toLowerCase();
+        availableCopies.set(key, (availableCopies.get(key) || 0) + 1);
     }
     if (availableCopies.size === 0) return content;
 
     let collapsedCopies = 0;
     const unmatchedTranslation = translationPart.replace(copyPattern, (token) => {
-        const remaining = availableCopies.get(token) || 0;
+        const key = token.toLowerCase();
+        const remaining = availableCopies.get(key) || 0;
         if (remaining < 1) return token;
-        availableCopies.set(token, remaining - 1);
+        availableCopies.set(key, remaining - 1);
         collapsedCopies++;
         return '';
     });
@@ -389,7 +429,11 @@ export function normalizeBilingualMacroCopiesForValidation(text) {
         return normalized;
     };
 
-    const source = String(text || '');
+    // 🚨 beta.3: 검증용 사본에서만 커리 따옴표를 스트레이트로 통일한다.
+    // 작가/모델이 “…" 처럼 짝을 섞으면 스트레이트 홀짝이 밀려 뒤쪽 병기 인용구가
+    // 인용구로 인식되지 않고 → 매크로 collapse 미실행 → 토큰 중복 오탐이 남.
+    // (이 함수의 반환값은 검증 비교에만 쓰이고 실제 출력은 바꾸지 않음)
+    const source = String(text || '').replace(/[“”]/g, '"');
     const tagPattern = /<\/?[a-zA-Z][^>]*>/g;
     let normalized = '';
     let lastIndex = 0;
@@ -420,13 +464,24 @@ export function restoreTranslationStructure(text, protection, options = {}) {
     for (const marker of protection.expectedMarkers) {
         const firstIndex = validationOutput.indexOf(marker);
         if (firstIndex < 0) {
-            return { ok: false, text: null, reason: `구조 토큰 누락: ${marker}` };
+            const sourcePos = protection.text.indexOf(marker);
+            return {
+                ok: false, text: null, reason: `구조 토큰 누락: ${marker}`,
+                detail: `원문에서 이 토큰의 자리:\n${snippetAround(protection.text, sourcePos, marker.length)}`
+            };
         }
-        if (validationOutput.indexOf(marker, firstIndex + marker.length) >= 0) {
-            return { ok: false, text: null, reason: `구조 토큰 중복: ${marker}` };
+        const secondIndex = validationOutput.indexOf(marker, firstIndex + marker.length);
+        if (secondIndex >= 0) {
+            return {
+                ok: false, text: null, reason: `구조 토큰 중복: ${marker}`,
+                detail: `1번째 등장:\n${snippetAround(validationOutput, firstIndex, marker.length)}\n\n2번째 등장:\n${snippetAround(validationOutput, secondIndex, marker.length)}`
+            };
         }
         if (firstIndex <= previousIndex) {
-            return { ok: false, text: null, reason: `구조 토큰 순서 변경: ${marker}` };
+            return {
+                ok: false, text: null, reason: `구조 토큰 순서 변경: ${marker}`,
+                detail: `출력에서의 위치:\n${snippetAround(validationOutput, firstIndex, marker.length)}`
+            };
         }
         previousIndex = firstIndex;
     }
@@ -444,8 +499,22 @@ export function restoreTranslationStructure(text, protection, options = {}) {
         const outPattern = computeSegmentPattern(validationOutput, protection.expectedMarkers);
         for (let i = 0; i < protection.segmentPattern.length; i++) {
             if (protection.segmentPattern[i] !== outPattern[i]) {
+                // 🚨 beta.3: 한국어 SOV 어순 재배치 허용 — 원문이 토큰으로 문장을 끝내면
+                // (he spots {{user}}.) 한국어 번역은 조사+서술어가 토큰 뒤로 이동함
+                // ({{user}}를 발견했다.) → 빈 구간 침입이 "직전 토큰에 공백 없이 붙은
+                // 짧은 한국어 꼬리"뿐이면 블록 밀림이 아니므로 통과시킨다.
+                if (!protection.segmentPattern[i] && outPattern[i] && i > 0 &&
+                    isKoreanTailSegment(getSegmentByMarkers(validationOutput, protection.expectedMarkers, i))) {
+                    continue;
+                }
                 const kind = protection.segmentPattern[i] ? '구간 내용 소실' : '빈 구간에 텍스트 침입';
-                return { ok: false, text: null, reason: `텍스트가 블록 경계를 넘어 이동함 (${kind}, 구간 ${i})` };
+                const srcSeg = getSegmentByMarkers(protection.text, protection.expectedMarkers, i);
+                const outSeg = getSegmentByMarkers(validationOutput, protection.expectedMarkers, i);
+                return {
+                    ok: false, text: null,
+                    reason: `텍스트가 블록 경계를 넘어 이동함 (${kind}, 구간 ${i})`,
+                    detail: `원문 구간 ${i}: ${JSON.stringify(revealSpecialChars(srcSeg).slice(0, 160))}\n출력 구간 ${i}: ${JSON.stringify(revealSpecialChars(outSeg).slice(0, 160))}`
+                };
             }
         }
     }
@@ -483,16 +552,45 @@ export function restoreTranslationTokens(text, protection) {
         restored = restored.split(token.marker).join(token.value);
     }
     
-    const unresolved = new RegExp(`@@${protection.namespace}_\\d{4}@@`).test(restored);
-    if (unresolved) {
-        return { ok: false, text: null, reason: '직역 파트에 복원되지 않은 구조 토큰이 남음' };
+    const unresolvedMatches = restored.match(new RegExp(`@@${protection.namespace}_\\d{4}@@`, 'g'));
+    if (unresolvedMatches) {
+        return {
+            ok: false, text: null, reason: '직역 파트에 복원되지 않은 구조 토큰이 남음',
+            detail: `잔존 토큰: ${[...new Set(unresolvedMatches)].join(', ')}`
+        };
     }
     return { ok: true, text: restored, reason: null };
+}
+
+// 🚨 beta.3: 모델이 매크로 대소문자만 통일한 경우({{User}}→{{user}}) 원문 표기로 복원.
+// 원문 자체가 {{user}}/{{User}} 혼용일 수 있으므로 등장 순서 기준으로 자리마다 맞춘다.
+// 개수가 다르면 손대지 않음 (뒤의 개수/서명 검증이 잡아냄).
+function repairMacroCasing(sourceText, outputText) {
+    const macroPattern = /\{\{[\s\S]*?\}\}/g;
+    const sourceMacros = String(sourceText || '').match(macroPattern) || [];
+    const outputMacros = String(outputText || '').match(macroPattern) || [];
+    if (sourceMacros.length === 0 || sourceMacros.length !== outputMacros.length) return outputText;
+    let index = 0;
+    let changed = false;
+    const repaired = String(outputText || '').replace(macroPattern, (macro) => {
+        const expected = sourceMacros[index++];
+        if (expected !== macro && expected.toLowerCase() === macro.toLowerCase()) {
+            changed = true;
+            return expected;
+        }
+        return macro;
+    });
+    return changed ? repaired : outputText;
 }
 
 export function validateTranslationStructure(source, output, options = {}) {
     const sourceText = String(source || '');
     const normalized = repairStructuredKeyPrefixes(sourceText, String(output || ''));
+    const caseRepaired = repairMacroCasing(sourceText, normalized.text);
+    if (caseRepaired !== normalized.text) {
+        console.log('[CAT] 🔧 매크로 대소문자 원문 표기로 복원');
+        normalized.text = caseRepaired;
+    }
     const validationText = options.allowBilingualMacroCopies === true
         ? normalizeBilingualMacroCopiesForValidation(normalized.text)
         : normalized.text;
@@ -592,6 +690,12 @@ function compareProtectedStructure(source, output) {
     }
     for (let i = 0; i < sourceSignature.length; i++) {
         if (sourceSignature[i] !== outputSignature[i]) {
+            // 🚨 beta.3: {{User}}↔{{user}}처럼 대소문자만 다른 매크로는 ST가 동일하게
+            // 치환하므로 구조 변경으로 취급하지 않는다 (모델의 케이스 통일 습관 흡수)
+            const isMacroPair = /^\{\{[\s\S]*\}\}$/.test(sourceSignature[i]) &&
+                /^\{\{[\s\S]*\}\}$/.test(outputSignature[i]) &&
+                sourceSignature[i].toLowerCase() === outputSignature[i].toLowerCase();
+            if (isMacroPair) continue;
             return { ok: false, reason: `구조 요소 변경: ${sourceSignature[i]}→${outputSignature[i]}` };
         }
     }

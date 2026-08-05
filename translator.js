@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
-import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
+import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
 import { deleteCached, getCached, setCached } from './cache.js';
 
 const LEGACY_SYSTEM_SHIELD = `[ABSOLUTE DIRECTIVE - VIOLATION = FAILURE]
@@ -623,8 +623,19 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         console.warn(`[CAT] 🧹 ${message}`);
     };
     
-    const retryRejectedTranslation = async (reason, finalMessage = null) => {
+    const retryRejectedTranslation = async (reason, finalMessage = null, detail = null) => {
         _lastDebugLog.error = `응답 검증 실패: ${reason}`;
+        // 🚨 beta.3 디버그: 실패 상세(어디가 어떻게 다른지) + 시도별 이력 체인 기록
+        if (detail) _lastDebugLog.validationDetail = detail;
+        _lastDebugLog.attempts = [
+            ...(Array.isArray(_lastDebugLog.attempts) ? _lastDebugLog.attempts : []),
+            {
+                time: new Date().toLocaleTimeString(),
+                path: _structureFallback ? 'legacy(토큰 미치환)' : '토큰 보호',
+                reason,
+                detail: detail || null
+            }
+        ];
         if (_qualityRetry < 1) {
             const useStructureFallback = !_structureFallback &&
                 structureProtection.hasStructure &&
@@ -666,7 +677,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
 
     try {
         let result = ""; let thought = null;
-        _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null };
+        // 🚨 beta.3 디버그: 재시도 재귀에서는 시도 이력을 이어받는다 (최초 호출에서만 리셋)
+    const inheritedAttempts = (retryReason && Array.isArray(_lastDebugLog.attempts)) ? _lastDebugLog.attempts : [];
+    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts };
         
         if (settings.profile && stContext.ConnectionManagerRequestService) {
             // 🚨 프로필 모드: systemInstruction 미지원 → 유저 메시지에 합침
@@ -922,12 +935,12 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             
             const naturalRestored = restoreTranslationStructure(initialLiteralSplit.natural, structureProtection, structureValidationOptions);
             if (!naturalRestored.ok) {
-                return await retryRejectedTranslation(naturalRestored.reason);
+                return await retryRejectedTranslation(naturalRestored.reason, null, naturalRestored.detail);
             }
             recordBoundaryRecovery(naturalRestored.boundaryRecovery);
             const literalRestored = restoreTranslationTokens(initialLiteralSplit.literal, structureProtection);
             if (!literalRestored.ok) {
-                return await retryRejectedTranslation(literalRestored.reason);
+                return await retryRejectedTranslation(literalRestored.reason, null, literalRestored.detail);
             }
             cleaned = `${naturalRestored.text}\n<<<CAT_LITERAL>>>\n${literalRestored.text}`;
         } else {
@@ -936,7 +949,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
             const restored = restoreTranslationStructure(cleaned, structureProtection, structureValidationOptions);
             if (!restored.ok) {
-                return await retryRejectedTranslation(restored.reason);
+                return await retryRejectedTranslation(restored.reason, null, restored.detail);
             }
             recordBoundaryRecovery(restored.boundaryRecovery);
             cleaned = restored.text;
@@ -979,7 +992,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         
         const validation = validateTranslationPayload(cleaned, text, settings, targetLang);
         if (!validation.ok) {
-            return await retryRejectedTranslation(validation.reason);
+            return await retryRejectedTranslation(validation.reason, null, validation.detail);
         }
 
         let quality = assessTranslationQuality(cleaned, text, settings, targetLang);
@@ -1204,7 +1217,10 @@ function collectQuotedSegmentsOutsideFences(text) {
     const source = String(text || '');
     const masked = source
         .replace(/```[^\n]*\n[\s\S]*?```/g, match => ' '.repeat(match.length))
-        .replace(/<\/?[a-zA-Z][^>]*>/g, match => ' '.repeat(match.length));
+        .replace(/<\/?[a-zA-Z][^>]*>/g, match => ' '.repeat(match.length))
+        // 🚨 beta.3: 작가 오타(“…")·모델 정규화("…”)로 커리/스트레이트가 섞이면
+        // 짝맞추기가 통째로 밀리므로 수집 단계에서 통일 (1:1 치환이라 index 불변)
+        .replace(/[“”]/g, '"');
     const patterns = [
         { type: 'double', regex: /"([^"]*)"/g },
         { type: 'curly', regex: /“([^”]*)”/g },
@@ -1228,6 +1244,14 @@ function validateKoEnBilingualDialogue(original, output) {
         );
     if (sourceDialogues.length === 0) return { ok: true, reason: null };
 
+    // 🚨 beta.3: 모델의 문장부호 정규화(’→', …→..., —→-) 한 글자에 exact match가
+    // 깨져 무한 재시도되던 것 방지 — 비교 전에 양쪽을 같은 표기로 맞춘다.
+    const canonizeForCompare = (value) => String(value || '')
+        .replace(/[’‘]/g, "'")
+        .replace(/…/g, '...')
+        .replace(/[—–]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim();
     const outputDialogues = collectQuotedSegmentsOutsideFences(output);
     let outputIndex = 0;
     for (let i = 0; i < sourceDialogues.length; i++) {
@@ -1237,16 +1261,32 @@ function validateKoEnBilingualDialogue(original, output) {
             const candidate = outputDialogues[outputIndex];
             if (candidate.type !== sourceDialogue.type) continue;
             const bilingual = candidate.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
-            if (!bilingual) continue;
-            if (bilingual[1].trim() !== sourceDialogue.content.trim()) continue;
+            if (!bilingual) {
+                // 🚨 beta.3: 서술 속 짧은 인용구(“surprisingly competent.” 등)를 모델이
+                // 대사가 아니라고 판단해 한국어로만 번역한 경우 허용. 짧은 대사의 병기
+                // 반쪽 누락과 구분은 불가하지만, 오탐 무한 재시도가 더 큰 손해다.
+                if (sourceDialogue.content.length <= 80 &&
+                    !/[A-Za-z]/.test(candidate.content) && /[가-힣]/.test(candidate.content)) {
+                    matched = true;
+                    outputIndex++;
+                    break;
+                }
+                continue;
+            }
+            if (canonizeForCompare(bilingual[1]) !== canonizeForCompare(sourceDialogue.content)) continue;
             matched = true;
             outputIndex++;
             break;
         }
         if (!matched) {
+            // 🚨 beta.3 디버그: 어느 원문 대사가, 그 시점 어떤 출력 후보들과 대조되다 실패했는지
+            const nearby = outputDialogues.slice(Math.max(0, outputIndex - 2), outputIndex + 1)
+                .map(seg => JSON.stringify(revealSpecialChars(seg.content).slice(0, 120)))
+                .join('\n');
             return {
                 ok: false,
-                reason: `한영 병기 구조 붕괴: 영어 원문 대사 또는 같은 따옴표 안의 한국어 병기 누락 (대사 ${i + 1})`
+                reason: `한영 병기 구조 붕괴: 영어 원문 대사 또는 같은 따옴표 안의 한국어 병기 누락 (대사 ${i + 1})`,
+                detail: `실패한 원문 대사 ${i + 1}: ${JSON.stringify(revealSpecialChars(sourceDialogue.content).slice(0, 160))}\n대조 지점 근처 출력 인용구:\n${nearby || '(남은 출력 인용구 없음)'}`
             };
         }
     }
