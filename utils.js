@@ -265,7 +265,7 @@ export function revealSpecialChars(value) {
 // 라인(----아님, ─── 박스문자, em-dash 연타, 숨은 공백 등)을 문자코드 노출로 구분해 나열
 export function auditDividerLines(text) {
     const strict = /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/;
-    const loose = /^[\s\u00A0]*[-\u2010-\u2015\u2500-\u257F_*=~\u30FC\uFF0D]{2,}[\s\u00A0]*$/;
+    const loose = /^[\s\u00A0]*[-\u2010-\u2015\u2500-\u257F_*=~\u30FC\uFF0D]{2,}[\s\u00A0]*$|^.{0,3}[-_*]{3,}.{0,3}$/;
     const matched = [];
     const nearMiss = [];
     String(text || '').split('\n').forEach((line, idx) => {
@@ -974,6 +974,16 @@ function restoreParagraphStructure(text, targetParagraphCount) {
 
 // 🚨 따옴표 균형 검사 및 복구
 function balanceQuotes(text, originalText) {
+    // 🚨 beta.3: 구조 잠금 원문(펜스/태그/구분선)에서는 따옴표 자동 복구를 건너뛴다.
+    // '"'+text 프리펜드가 첫 줄 구분선을 “--- 로 오염시켜 구조 검증을 깨뜨렸음(구분선 8→7 사건).
+    // 코스메틱 복구보다 구조 보존이 우선이고, 구조는 어차피 뒤의 검증이 지킨다.
+    if (originalText && (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || /^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/m.test(originalText))) {
+        return text;
+    }
+    // 🚨 beta.3: 원문 자체가 ASCII 따옴표 홀수면(절단 메시지 등) 번역의 홀수도 정상 — 복구하지 않음
+    if (originalText && ((originalText.match(/"/g) || []).length % 2 !== 0)) {
+        return text;
+    }
     // 영어 따옴표: " (smart quotes는 별도)
     // 한국어 따옴표: "", 「」, 『』
     

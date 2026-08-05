@@ -988,7 +988,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         if (_structureFallback) {
             const fallbackStructure = validateTranslationStructure(text, naturalCleaned, structureValidationOptions);
             if (!fallbackStructure.ok) {
-                return await retryRejectedTranslation(fallbackStructure.reason);
+                return await retryRejectedTranslation(fallbackStructure.reason, null, fallbackStructure.detail);
             }
             recordBoundaryRecovery(fallbackStructure.boundaryRecovery);
             if (fallbackStructure.text !== naturalCleaned) {
