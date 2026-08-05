@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
-import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
+import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, auditDividerLines, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
 import { deleteCached, getCached, setCached } from './cache.js';
 
 const LEGACY_SYSTEM_SHIELD = `[ABSOLUTE DIRECTIVE - VIOLATION = FAILURE]
@@ -589,7 +589,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         targetLang,
         isToEnglish,
         hasStructure: structureProtection.hasStructure ||
-            /```|<!--|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|^(?:---|___|\*\*\*)\s*$/m.test(sourceText),
+            /```|<!--|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/m.test(sourceText),
         hasContext: contextMessages.length > 0
     });
 
@@ -1372,7 +1372,15 @@ export function validateTranslationPayload(output, originalText, settings, targe
         sourceStructure.rules !== outputStructure.rules) {
         return {
             ok: false,
-            reason: `구조 개수 불일치: 펜스 ${sourceStructure.fences}→${outputStructure.fences}, 태그 ${sourceStructure.tags}→${outputStructure.tags}, 구분선 ${sourceStructure.rules}→${outputStructure.rules}`
+            reason: `구조 개수 불일치: 펜스 ${sourceStructure.fences}→${outputStructure.fences}, 태그 ${sourceStructure.tags}→${outputStructure.tags}, 구분선 ${sourceStructure.rules}→${outputStructure.rules}`,
+            detail: (() => {
+                if (sourceStructure.rules === outputStructure.rules) return null;
+                const srcAudit = auditDividerLines(original);
+                const outAudit = auditDividerLines(structureCheckedNatural);
+                return `원문 구분선 매칭 ${srcAudit.matched.length}개 / 출력 매칭 ${outAudit.matched.length}개` +
+                    (outAudit.nearMiss.length ? `\n⚠️ 출력의 매칭 실패 유사 구분선:\n${outAudit.nearMiss.slice(0, 5).join('\n')}` : '') +
+                    (srcAudit.nearMiss.length ? `\n⚠️ 원문의 매칭 실패 유사 구분선:\n${srcAudit.nearMiss.slice(0, 5).join('\n')}` : '');
+            })()
         };
     }
     
@@ -1497,7 +1505,7 @@ function countOutputStructure(text) {
         fences: (source.match(/```/g) || []).length,
         backticks: (source.match(/`/g) || []).length,
         tags: (source.match(/<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}/g) || []).length,
-        rules: (source.match(/^(?:[\t ]*)(?:---|___|\*\*\*)(?:[\t ]*)$/gm) || []).length
+        rules: (source.match(/^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm) || []).length
     };
 }
 

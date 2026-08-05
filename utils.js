@@ -63,8 +63,10 @@ export function catNotifyProgress(message, onAbort) {
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
     
+    // 🚨 beta.3: CRLF/단독 CR 정규화 — 모델·프로필 경유 응답에 \r이 섞이면
+    // 행 단위 정규식(구분선 카운트 등)이 통째로 미끄러진다. 모든 후처리의 관문에서 통일.
     // AI가 앞에 붙이는 "번역:" 등 접두어 제거
-    let cleaned = text;
+    let cleaned = String(text).replace(/\r\n?/g, '\n');
     const responsePrefix = /^(번역|Translation|Output|Input|Result):\s*/i;
     if (!originalText || !responsePrefix.test(originalText.trimStart())) {
         cleaned = cleaned.replace(responsePrefix, "");
@@ -158,7 +160,7 @@ export function cleanResult(text, originalText = null, structureProtection = nul
     
     // 🚨 문단 구조 보존: 원문과 비교해서 문단 수 부족하면 경고
     const originalHasLockedStructure = originalText &&
-        (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || /^(?:---|___|\*\*\*)\s*$/m.test(originalText));
+        (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || /^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/m.test(originalText));
     if (originalText && originalText.length > 200 && !originalHasLockedStructure) {
         const origParagraphs = originalText.split(/\n{2,}/).filter(p => p.trim().length > 0);
         const transParagraphs = cleaned.split(/\n{2,}/).filter(p => p.trim().length > 0);
@@ -211,7 +213,7 @@ export function protectTranslationStructure(text) {
             const body = line.slice(indent.length);
             const indentToken = indent ? addToken(indent, 'indent') : '';
             
-            if (/^(?:---|___|\*\*\*)\s*$/.test(body)) {
+            if (/^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/.test(body)) {
                 return lineAnchor + addToken(line, 'whole-line');
             }
             return lineAnchor + indentToken + body;
@@ -228,7 +230,7 @@ export function protectTranslationStructure(text) {
     
     // 코드블럭 밖의 정규식 트리거용 구분선도 원문 그대로 보존한다.
     protectedText = protectedText.replace(
-        /^(?:[\t ]*)(?:---|___|\*\*\*)(?:[\t ]*)$/gm,
+        /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm,
         (value) => addToken(value, 'whole-line')
     );
     
@@ -254,9 +256,23 @@ export function protectTranslationStructure(text) {
 // (커리 아포스트로피 ’ vs ' 같은 한 글자 차이가 원격 로그에서 보이도록)
 export function revealSpecialChars(value) {
     return String(value || '').replace(
-        /[\u2018\u2019\u201C\u201D\u2013\u2014\u2026\u00A0\u3000]/g,
+        /[\u2018\u2019\u201C\u201D\u2010-\u2015\u2026\u00A0\u00AD\u3000\u2500-\u257F\u30FC\uFF0D\r]/g,
         (ch) => `${ch}⟨U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`
     );
+}
+
+// 🚨 beta.3 디버그: 구분선 감사 — 엄격 매칭된 라인과 "구분선처럼 생겼는데 매칭 실패한"
+// 라인(----아님, ─── 박스문자, em-dash 연타, 숨은 공백 등)을 문자코드 노출로 구분해 나열
+export function auditDividerLines(text) {
+    const strict = /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/;
+    const loose = /^[\s\u00A0]*[-\u2010-\u2015\u2500-\u257F_*=~\u30FC\uFF0D]{2,}[\s\u00A0]*$/;
+    const matched = [];
+    const nearMiss = [];
+    String(text || '').split('\n').forEach((line, idx) => {
+        if (strict.test(line)) matched.push(`${idx + 1}행 ${JSON.stringify(revealSpecialChars(line))}`);
+        else if (loose.test(line)) nearMiss.push(`${idx + 1}행 ${JSON.stringify(revealSpecialChars(line))}`);
+    });
+    return { matched, nearMiss };
 }
 
 // 🚨 beta.3 디버그: 특정 위치 앞뒤 문맥 발췌 (제어문자 가시화 포함)
@@ -683,9 +699,14 @@ function compareProtectedStructure(source, output) {
     const sourceSignature = getStructureSignature(source);
     const outputSignature = getStructureSignature(output);
     if (sourceSignature.length !== outputSignature.length) {
+        const srcAudit = auditDividerLines(source);
+        const outAudit = auditDividerLines(output);
         return {
             ok: false,
-            reason: `구조 요소 개수 불일치: ${sourceSignature.length}→${outputSignature.length}`
+            reason: `구조 요소 개수 불일치: ${sourceSignature.length}→${outputSignature.length}`,
+            detail: `원문 요소: ${sourceSignature.join(' | ').slice(0, 200)}\n출력 요소: ${outputSignature.join(' | ').slice(0, 200)}\n원문 구분선 ${srcAudit.matched.length}개 / 출력 구분선 ${outAudit.matched.length}개` +
+                (outAudit.nearMiss.length ? `\n⚠️ 출력의 매칭 실패 유사 구분선:\n${outAudit.nearMiss.slice(0, 5).join('\n')}` : '') +
+                (srcAudit.nearMiss.length ? `\n⚠️ 원문의 매칭 실패 유사 구분선:\n${srcAudit.nearMiss.slice(0, 5).join('\n')}` : '')
         };
     }
     for (let i = 0; i < sourceSignature.length; i++) {
@@ -755,7 +776,7 @@ function getStructureMatches(text) {
     const patterns = [
         /```[^\n]*/g,
         /<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}/g,
-        /^(?:[\t ]*)(?:---|___|\*\*\*)(?:[\t ]*)$/gm
+        /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm
     ];
     patterns.forEach((pattern) => {
         for (const match of String(text || '').matchAll(pattern)) {
@@ -837,7 +858,7 @@ function repairStructuredKeyPrefixes(source, output) {
 function getStructureLayout(text) {
     const source = String(text || '');
     const regions = [...source.matchAll(
-        /```[^\n]*\n[\s\S]*?```|<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|^(?:[\t ]*)(?:---|___|\*\*\*)(?:[\t ]*)$/gm
+        /```[^\n]*\n[\s\S]*?```|<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm
     )];
     const contentGaps = [];
     let cursor = 0;
