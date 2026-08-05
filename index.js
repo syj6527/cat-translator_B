@@ -351,7 +351,7 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
     if (stuckGlow.length > 0) {
         const startTime = parseInt(stuckGlow.attr('data-cat-glow-start') || '0');
         const elapsed = Date.now() - startTime;
-        if (startTime > 0 && elapsed > 60000) {
+        if (startTime > 0 && elapsed > 180000) {
             console.warn(`[CAT] 🔧 글로우 stuck 감지 (${Math.round(elapsed/1000)}s) → 강제 해제 후 재시도 #${msgId}`);
             stopGlow();
         } else {
@@ -360,12 +360,19 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
     }
     startGlow();
     // 🚨 글로우 안전장치: 60초 후 자동 해제 (에러로 stuck 방지)
-    const glowTimeout = setTimeout(() => { stopGlow(); console.warn(`[CAT] ⚠️ 글로우 타임아웃 #${msgId}`); }, 60000);
+    const glowTimeout = setTimeout(() => { stopGlow(); console.warn(`[CAT] ⚠️ 글로우 타임아웃 #${msgId}`); }, 180000); // 🚨 beta.3: 장문+재시도는 60초를 정상 초과 → 조기 소등이 유저 재탭·중복 실행 유발
     let historyShown = false;
     // 🚨 beta.9: 외부 signal(벌크 등) 없으면 자체 중단 컨트롤러 생성 — 수동/자동 모두 버튼 탭으로 중단 가능
     // (isAutoTriggered 판정·조기 return 이후 시점에 등록해 레지스트리 누수 방지)
     let _ownAbortCtrl = null;
     if (!abortSignal) {
+        // 🚨 beta.3: 같은 메시지에 진행 중인 번역이 있으면 먼저 중단 — 글로우 소등 후
+        // 재탭 시 기존 번역이 도는 채로 새 번역이 겹쳐 돌던 동시 실행 차단
+        const staleCtrl = _activeTranslationAborts.get(msgId);
+        if (staleCtrl && !staleCtrl.signal.aborted) {
+            console.warn(`[CAT] ⛔ 기존 진행 중 번역 중단 후 새로 시작 #${msgId}`);
+            staleCtrl.abort();
+        }
         _ownAbortCtrl = new AbortController();
         abortSignal = _ownAbortCtrl.signal;
         _activeTranslationAborts.set(msgId, _ownAbortCtrl);
@@ -1167,7 +1174,7 @@ jQuery(async () => {
             $('.cat-mes-trans-btn .cat-emoji-icon.cat-glow-anim, #cat-input-btn .cat-emoji-icon.cat-glow-anim').each(function () {
                 const startTime = parseInt($(this).attr('data-cat-glow-start') || '0');
                 const elapsed = Date.now() - startTime;
-                if (startTime > 0 && elapsed > 60000) {
+                if (startTime > 0 && elapsed > 180000) {
                     $(this).removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
                     console.warn(`[CAT] 🔧 visibility 복귀 → stuck 글로우 정리 (${Math.round(elapsed/1000)}s)`);
                 }

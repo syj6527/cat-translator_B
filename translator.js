@@ -637,16 +637,28 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
         ];
         if (_qualityRetry < 1) {
-            const useStructureFallback = !_structureFallback &&
+            // 🚨 beta.3: 잘린 소스 + 구조 증가 = 모델이 절단점 이후를 창작한 것.
+            // legacy 폴백(토큰 미치환)으로는 원인이 해소되지 않으므로,
+            // 같은 경로에서 "절단점에서 멈춰라"를 정조준한 재시도 사유를 쓴다.
+            const growthMatch = String(reason).match(/개수 불일치: (\d+)→(\d+)/);
+            const inventedBeyondCutoff = detectTruncatedSource(text) && (
+                /구조 토큰 중복/.test(reason) ||
+                (growthMatch && parseInt(growthMatch[2], 10) > parseInt(growthMatch[1], 10))
+            );
+            let useStructureFallback = !inventedBeyondCutoff && !_structureFallback &&
                 structureProtection.hasStructure &&
                 isStructureCompatibilityFailure(reason);
-            const nextRetryReason = useStructureFallback
-                ? 'The previous response could not preserve compatibility markers. Translate the original text directly and preserve every code fence, tag, divider, line break, indentation, and structured key exactly.'
-                : reason;
+            const nextRetryReason = inventedBeyondCutoff
+                ? 'You added content beyond the cutoff of the truncated source (extra dividers/sections). The source ends mid-sentence by design. Translate only up to that exact cutoff and stop there. Ending abruptly is correct.'
+                : useStructureFallback
+                    ? 'The previous response could not preserve compatibility markers. Translate the original text directly and preserve every code fence, tag, divider, line break, indentation, and structured key exactly.'
+                    : reason;
             console.warn(
-                useStructureFallback
-                    ? `[CAT] 🔁 구조 토큰 비호환 → 구버전 방식으로 1회 재시도: ${reason}`
-                    : `[CAT] 🔁 응답 검증 실패 → 1회 재시도: ${reason}`
+                inventedBeyondCutoff
+                    ? `[CAT] 🔁 절단 소스 초과 창작 감지 → 절단점 준수 재시도: ${reason}`
+                    : useStructureFallback
+                        ? `[CAT] 🔁 구조 토큰 비호환 → 구버전 방식으로 1회 재시도: ${reason}`
+                        : `[CAT] 🔁 응답 검증 실패 → 1회 재시도: ${reason}`
             );
             return fetchTranslation(text, settings, stContext, {
                 ...options,
@@ -708,7 +720,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             
             for (let attempt = 0; attempt < MAX_PROFILE_RETRIES; attempt++) {
                 // 🚨 beta.9: 중단 요청 시 프로필 모드는 재시도 진입 전 즉시 종료
-                if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 시도 전)'); return null; }
+                if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 시도 전)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; return null; }
                 try {
                     // 🚨 재시도 시 토큰 증량 (thinking 모델이 토큰 부족으로 빈 응답 주는 케이스 대응)
                     // attempt 0: 기본값, attempt 1: 2배, attempt 2: 4배 (최대 32768)
@@ -719,7 +731,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                     
                     const response = await stContext.ConnectionManagerRequestService.sendRequest(settings.profile, [{ role: "user", content: fullPrompt }], attemptMaxTokens);
                     // 🚨 beta.9: 프로필 요청은 도중 취소가 불가 → 도착한 결과를 폐기하는 방식으로 중단 처리
-                    if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); return null; }
+                    if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; return null; }
                     
                     // 🚨 응답 필드 다양화 시도 (ST가 reasoning_content / content / text 등 다양한 형식 반환 가능)
                     if (typeof response === 'string') {
@@ -1537,6 +1549,29 @@ function clipPromptText(text, maxLength) {
     return `${source.slice(0, side)}\n...[context clipped]...\n${source.slice(-side)}`;
 }
 
+// 🚨 beta.3: 소스 절단 감지 — RP측 max tokens에 잘린 메시지는 문장 중간에서 끝남.
+// 잘린 소스를 받은 번역 모델은 "중간에 멈추면 틀린 것 같아서" 이야기를 이어 쓰고
+// (엔딩 창작 → 구조 요소 증가 → 검증 탈락), 이를 막으려면 금지가 아니라
+// "끊긴 데서 멈추는 게 정답"이라는 허가를 줘야 한다. 오탐 비용이 거의 없음:
+// 온전한 소스에 이 지시가 붙어도 "끝까지 번역하고 멈춰라" = 평소 동작 그대로라서.
+function detectTruncatedSource(text) {
+    const source = String(text || '').trimEnd();
+    if (source.length < 200) return false;
+    const lines = source.split('\n');
+    let last = '';
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].trim()) { last = lines[i].trim(); break; }
+    }
+    if (!last) return false;
+    // 구조 줄(디바이더/헤더/펜스/단독 토큰)은 원래 종결부호 없이 끝나므로 판정 제외
+    if (/^(---|\*\*\*|___|#{1,6}\s|```)/.test(last)) return false;
+    if (/^@@[A-Za-z0-9_]+_\d{4}@@$/.test(last)) return false;
+    // 마크다운 장식·닫는 따옴표류 제거 후, 글자/쉼표류로 끝나면 절단 의심
+    const stripped = last.replace(/[*_~`"'”’」』)\]]+$/g, '').trimEnd();
+    if (!stripped) return false;
+    return /[A-Za-z가-힣0-9,;:—–-]$/.test(stripped);
+}
+
 export function assemblePrompt(text, targetLang, isToEnglish, settings, options = {}) {
     const {
         prevTranslation = null,
@@ -1576,9 +1611,18 @@ Only inside fences explicitly marked YAML/JSON, keep machine-readable keys and p
     if (retryReason) {
         parts.push(`
 [RETRY - PREVIOUS RESPONSE WAS REJECTED]
-Reason: ${String(retryReason).substring(0, 180)}
+Reason: ${String(retryReason).substring(0, 400)}
 Fix that exact failure. Output only the translation payload.
 Do not print checks, arrows, source/output labels, explanations, or the word "Correct".`);
+    }
+
+    // 🚨 beta.3: 잘린 소스면 "끊긴 데서 멈추는 게 정답"이라는 허가 블록 주입
+    if (detectTruncatedSource(sourceText)) {
+        parts.push(`
+[TRUNCATED SOURCE]
+The source below was cut off mid-sentence by an upstream token limit. This is expected and normal.
+Translate faithfully up to the exact cutoff and stop where the source stops, even mid-sentence or mid-word.
+Ending abruptly at the cutoff is the correct behavior. Never finish the last sentence, and never add scenes, endings, dividers, or summaries beyond the cutoff.`);
     }
     
     if (settings.literalBilingual === 'on' && !isToEnglish) {
