@@ -490,7 +490,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     }
     const structureValidationOptions = {
         allowBilingualMacroCopies:
-            (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean'
+            (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean',
+        // 🚨 beta.5: 절단 소스에서만 구분선 '증가'를 하드 실패로 유지 (창작 카나리아)
+        sourceTruncated: detectTruncatedSource(text)
     };
 
     // 메타 토큰을 제외한 주 언어가 목표 언어라고 확실할 때만 같은 언어로 판정한다.
@@ -622,8 +624,16 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         _lastDebugLog.recovery = message;
         console.warn(`[CAT] 🧹 ${message}`);
     };
+
+    // 🚨 beta.5: 구분선 소프트 허용 등 "통과했지만 알아둘 것"을 디버그 로그에 축적
+    const recordSoftNote = (note) => {
+        if (!note) return;
+        _lastDebugLog.recovery = _lastDebugLog.recovery
+            ? `${_lastDebugLog.recovery} / ${note}`
+            : note;
+    };
     
-    const retryRejectedTranslation = async (reason, finalMessage = null, detail = null) => {
+    const retryRejectedTranslation = async (reason, finalMessage = null, detail = null, salvageText = null) => {
         _lastDebugLog.error = `응답 검증 실패: ${reason}`;
         // 🚨 beta.3 디버그: 실패 상세(어디가 어떻게 다른지) + 시도별 이력 체인 기록
         if (detail) _lastDebugLog.validationDetail = detail;
@@ -674,6 +684,21 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             _lastDebugLog.cleaned = _softCandidate.cleaned;
             _lastDebugLog.quality = _softCandidate.quality;
             return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought);
+        }
+        // 🚨 beta.5: 병기 구조 붕괴로만 최종 실패한 경우 → 번역을 버리지 않고
+        // 괄호를 벗겨 순수 한국어로 강등해서 표시한다 (우아한 강등).
+        // "번역이 아예 안 됨"이 사용자에게 가장 나쁜 결말이라는 원칙.
+        if (salvageText && /한영 병기 구조 붕괴/.test(String(reason))) {
+            const degraded = degradeBilingualToKorean(salvageText);
+            if (degraded && degraded.trim() && /[가-힣]/.test(degraded)) {
+                console.warn('[CAT] 🩹 병기 형식 복구 실패 → 한국어만 남겨 표시');
+                recordSoftNote('병기 형식 실패 → 한국어 전용으로 강등 표시');
+                if (!silent) {
+                    catNotify(`${getThemeEmoji()} 병기 형식이 맞지 않아 이번 메시지는 한국어만 표시해요.`, 'warning');
+                }
+                _lastDebugLog.cleaned = degraded;
+                return acceptTranslation(degraded, null);
+            }
         }
         if (!silent) {
             const shortReason = String(reason || '알 수 없는 형식 오류')
@@ -952,6 +977,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 return await retryRejectedTranslation(naturalRestored.reason, null, naturalRestored.detail);
             }
             recordBoundaryRecovery(naturalRestored.boundaryRecovery);
+            recordSoftNote(naturalRestored.softNote);
             const literalRestored = restoreTranslationTokens(initialLiteralSplit.literal, structureProtection);
             if (!literalRestored.ok) {
                 return await retryRejectedTranslation(literalRestored.reason, null, literalRestored.detail);
@@ -966,6 +992,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 return await retryRejectedTranslation(restored.reason, null, restored.detail);
             }
             recordBoundaryRecovery(restored.boundaryRecovery);
+            recordSoftNote(restored.softNote);
             cleaned = restored.text;
         }
         
@@ -993,6 +1020,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 return await retryRejectedTranslation(fallbackStructure.reason, null, fallbackStructure.detail);
             }
             recordBoundaryRecovery(fallbackStructure.boundaryRecovery);
+            recordSoftNote(fallbackStructure.softNote);
             if (fallbackStructure.text !== naturalCleaned) {
                 if (fallbackStructure.repairedKeys > 0) {
                     console.log(`[CAT] 🔧 구조 키 ${fallbackStructure.repairedKeys}개 자동 복원`);
@@ -1006,8 +1034,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         
         const validation = validateTranslationPayload(cleaned, text, settings, targetLang);
         if (!validation.ok) {
-            return await retryRejectedTranslation(validation.reason, null, validation.detail);
+            return await retryRejectedTranslation(validation.reason, null, validation.detail, cleaned);
         }
+        recordSoftNote(validation.softNote);
 
         let quality = assessTranslationQuality(cleaned, text, settings, targetLang);
         if (!_softCandidate && quality.retry && _qualityRetry < 1) {
@@ -1210,10 +1239,35 @@ function postProcessBilingualText(text, bilingualMode) {
                 console.log('[CAT] 🔄 병기 역순 감지 → 자동 교정');
                 return `"${eng.trim()} [${kor.trim()}]${rest}"`;
             });
-            // 🚨 v1.1.2: "영어" "[한국어]" 분리 출력 병합 (괄호가 별도 따옴표로 밀려난 케이스)
-            processed = processed.replace(/"([^"]*[A-Za-z][^"]*)"\s*"\[([^\]]*[가-힣][^\]]*)\]"/g, '"$1 [$2]"');
-            processed = processed.replace(/"([^"]*?)"\s*\[([^\]]+)\]/g, '"$1 [$2]"');
-            processed = processed.replace(/\."\s*\[/g, '. [');
+            // 🚨 beta.5: 따옴표 꼬임 버그 수정 — 기존 첫 규칙이 영문(A-Za-z) 포함을
+            // 요구해서 한국어 인용구("영어" 같은)를 거르지 못했고, 그 결과 다음 규칙이
+            // 닫는따옴표+여는따옴표를 한 쌍으로 오인해 "…"  […]"" 꼴로 따옴표를
+            // 꼬아놓았음(실측 재현). 내용 제한을 풀어 순서 하자를 제거한다.
+            processed = processed.replace(/"([^"]+)"\s*"\[([^\]]*[가-힣][^\]]*)\]"/g, '"$1 [$2]"');
+            // 괄호가 따옴표 밖으로 밀린 케이스: 실제 내용이 있는 인용구 + 한국어 괄호만
+            // 병합 (공백뿐인 가짜 인용구 오인 방지, [숫자] 각주류 오병합 방지)
+            processed = processed.replace(/"([^"]*[^\s"][^"]*)"\s*\[([^\]]*[가-힣][^\]]*)\]/g, '"$1 [$2]"');
+            // 잔여 케이스(마침표 뒤 괄호): 한국어 괄호일 때만 — [숫자] 각주의 닫는따옴표를 먹지 않게
+            processed = processed.replace(/\."\s*\[(?=[^\]]*[가-힣])/g, '. [');
+            // 🚨 beta.5: "한국어 [한국어]" 중복 병기 접기 — 모델이 영어 원문 유지에
+            // 실패하고 한국어 번역을 이중으로 뱉은 케이스. 바깥이 한국어이고 영문이
+            // 없으면(병기 형식의 원문 슬롯이 비어있다는 뜻) 괄호 안 한국어만 남긴다.
+            // 짧은 영문 단어(고유명사 등)가 섞인 한국어는 오탐 방지를 위해 건드리지 않음.
+            const beforeKoDup = processed;
+            const collapseKoDup = (open, close) => {
+                const pattern = new RegExp(
+                    `${open}([^${close}\\[\\]]*[가-힣][^${close}\\[\\]]*?)\\s*\\[([^\\]]*[가-힣][^\\]]*)\\]\\s*${close}`,
+                    'g'
+                );
+                processed = processed.replace(pattern, (match, outer, inner) => {
+                    if (/[A-Za-z]/.test(outer)) return match;
+                    return `${open}${inner.trim()}${close}`;
+                });
+            };
+            collapseKoDup('"', '"');
+            collapseKoDup('「', '」');
+            collapseKoDup('『', '』');
+            if (beforeKoDup !== processed) console.log('[CAT] 🧹 한국어[한국어] 중복 병기 접기');
             return processed;
         }
         
@@ -1307,6 +1361,37 @@ function validateKoEnBilingualDialogue(original, output) {
     return { ok: true, reason: null };
 }
 
+// 🚨 beta.5: 병기 구조가 최종 실패했을 때의 우아한 강등(graceful degradation).
+// "English [한국어]" → "한국어" 로 괄호를 벗겨 순수 한국어 번역만 남긴다.
+// 병기는 잃지만 번역 자체는 살아남음 — "번역 안 됨"보다 백배 나은 결말.
+// 한 인용구에 괄호가 여러 개면(끊긴 병기) 한국어들을 이어붙인다.
+// 코드펜스 안은 건드리지 않는다.
+function degradeBilingualToKorean(text) {
+    const stripPair = (open, close) => (segment) => segment.replace(
+        new RegExp(`${open}([^${close}]*\\[[^\\]]*[가-힣][^\\]]*\\][^${close}]*)${close}`, 'g'),
+        (match, inner) => {
+            const koreanParts = [];
+            let leftover = inner.replace(/([^\[\]]*?)\s*\[([^\]]*[가-힣][^\]]*)\]/g, (mm, pre, ko) => {
+                koreanParts.push(ko.trim());
+                return '';
+            });
+            leftover = leftover.replace(/\s+/g, ' ').trim();
+            if (koreanParts.length === 0) return match;
+            const joined = koreanParts.join(' ') + (leftover ? ` ${leftover}` : '');
+            return `${open}${joined}${close}`;
+        }
+    );
+    return transformOutsideFencedBlocks(String(text || ''), (segment) => {
+        let processed = segment;
+        // 커리 따옴표를 스트레이트로 통일해 짝 계산 밀림 방지 (강등 시점에는 안전)
+        processed = processed.replace(/[“”]/g, '"');
+        processed = stripPair('"', '"')(processed);
+        processed = stripPair('「', '」')(processed);
+        processed = stripPair('『', '』')(processed);
+        return processed;
+    });
+}
+
 function transformOutsideFencedBlocks(text, transform) {
     const source = String(text || '');
     const fencePattern = /```[^\n]*\n[\s\S]*?```/g;
@@ -1369,16 +1454,22 @@ export function validateTranslationPayload(output, originalText, settings, targe
             ? normalizeBilingualMacroCopiesForValidation(natural)
             : natural;
     const outputStructure = countOutputStructure(structureCheckedNatural);
-    // 🚨 beta.4: 구분선 '감소'만 소프트 허용 — 하나 빠진 건 미용상 흠집인데
-    // 번역 전체 사망은 형벌 과잉. '증가'는 창작(엔딩 지어내기)의 카나리아라 하드 유지.
-    const dividerOnlyLoss = sourceStructure.fences === outputStructure.fences &&
+    // 🚨 beta.5: 구분선은 증감 모두 소프트 허용으로 통일 (utils의 compareProtectedStructure와
+    // 같은 정책). 실측 오류(8→7, 8→9, 0→5)의 주범이 구분선 1:1 강제였음.
+    // 감소 ±2 제한도 철폐 — 펜스/태그가 온전하면 구분선 손실은 미용상 흠집.
+    // 예외: 절단된 소스에서 구분선 '증가'만은 절단점 너머 창작의 카나리아라 하드 유지
+    // → 절단점 준수 재시도(inventedBeyondCutoff)가 발동하게 한다.
+    let dividerSoftNote = null;
+    const dividerOnlyDiff = sourceStructure.fences === outputStructure.fences &&
         sourceStructure.tags === outputStructure.tags &&
-        outputStructure.rules < sourceStructure.rules &&
-        outputStructure.rules >= sourceStructure.rules - 2;
-    if (dividerOnlyLoss) {
-        console.warn(`[CAT] ⚠️ 구분선 ${sourceStructure.rules}→${outputStructure.rules} 감소 — 소프트 허용 (번역 유지)`);
+        sourceStructure.rules !== outputStructure.rules &&
+        !(outputStructure.rules > sourceStructure.rules && detectTruncatedSource(original));
+    if (dividerOnlyDiff) {
+        dividerSoftNote = `구분선 ${sourceStructure.rules}→${outputStructure.rules} ` +
+            `${outputStructure.rules < sourceStructure.rules ? '감소' : '증가'} — 소프트 허용 (번역 유지)`;
+        console.warn(`[CAT] ⚠️ ${dividerSoftNote}`);
     }
-    if (!dividerOnlyLoss && (sourceStructure.fences !== outputStructure.fences ||
+    if (!dividerOnlyDiff && (sourceStructure.fences !== outputStructure.fences ||
         sourceStructure.tags !== outputStructure.tags ||
         sourceStructure.rules !== outputStructure.rules)) {
         return {
@@ -1395,7 +1486,7 @@ export function validateTranslationPayload(output, originalText, settings, targe
         };
     }
     
-    return { ok: true, reason: null };
+    return { ok: true, reason: null, softNote: dividerSoftNote };
 }
 
 export function assessTranslationQuality(output, originalText, settings, targetLang) {
@@ -2146,6 +2237,12 @@ function getKoreanVoiceReference(message) {
         candidate = message.extra.original_mes;
     } else if (/[가-힣]/.test(message.extra?.display_text || '')) {
         candidate = message.extra.display_text;
+    } else if (!message.is_user && /[가-힣]/.test(message.mes || '')) {
+        // 🚨 beta.5: 폴백 — 이전 메시지의 번역이 검증 실패로 폐기되면 display_text가
+        // 없어 그 화자의 말투 참고가 통째로 사라졌음(말투 일관성 연쇄 붕괴).
+        // mes 자체가 한국어인 경우(다른 번역 확장 사용, 원문이 한국어인 카드 등)를
+        // 말투 참고로 구제한다. 영어 mes는 여기 걸리지 않으므로 오염 없음.
+        candidate = message.mes;
     }
     if (!candidate) return null;
     

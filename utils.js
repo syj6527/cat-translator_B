@@ -3,6 +3,25 @@
 // 유틸리티: 알림, 정규식 세탁기, HTML/CSS 방어, 언어 감지
 // ============================================================
 
+// ============================================================
+// 🚨 beta.5: 구분선 판정 단일 출처 (Single Source of Truth)
+// 같은 패턴이 6군데에 복붙되어 있어 한 곳만 고치면 나머지가 어긋나는
+// 드리프트 사고를 막기 위해 여기로 통합. 의미는 기존과 동일:
+// "-{3,} / _{3,} / *{3,} 만으로 이루어진 한 줄" (앞뒤 공백/NBSP 허용).
+// g 플래그 정규식의 lastIndex 상태 공유 사고를 원천 차단하기 위해
+// 공유 객체 대신 팩토리로 매번 새 인스턴스를 만든다.
+// ============================================================
+const DIVIDER_LINE_SRC = '^(?:[\\t \\u00A0]*)(?:-{3,}|_{3,}|\\*{3,})(?:[\\t \\u00A0]*)$';
+
+export function dividerLineRegex(flags = '') {
+    return new RegExp(DIVIDER_LINE_SRC, flags);
+}
+
+// 구조 시그니처 요소값(매치된 줄 전체, 공백 포함 가능)이 구분선인지 판정
+export function isDividerElement(value) {
+    return dividerLineRegex().test(String(value ?? ''));
+}
+
 export function getThemeEmoji() {
     const theme = document.body.getAttribute('data-cat-theme');
     return theme === 'tiger' ? '🐯' : '🐱';
@@ -60,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.2-beta.4';
+export const CAT_BETA_VERSION = '1.1.2-beta.5';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -162,7 +181,7 @@ export function cleanResult(text, originalText = null, structureProtection = nul
     
     // 🚨 문단 구조 보존: 원문과 비교해서 문단 수 부족하면 경고
     const originalHasLockedStructure = originalText &&
-        (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || /^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/m.test(originalText));
+        (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || dividerLineRegex('m').test(originalText));
     if (originalText && originalText.length > 200 && !originalHasLockedStructure) {
         const origParagraphs = originalText.split(/\n{2,}/).filter(p => p.trim().length > 0);
         const transParagraphs = cleaned.split(/\n{2,}/).filter(p => p.trim().length > 0);
@@ -215,7 +234,7 @@ export function protectTranslationStructure(text) {
             const body = line.slice(indent.length);
             const indentToken = indent ? addToken(indent, 'indent') : '';
             
-            if (/^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/.test(body)) {
+            if (isDividerElement(body)) {
                 return lineAnchor + addToken(line, 'whole-line');
             }
             return lineAnchor + indentToken + body;
@@ -232,7 +251,7 @@ export function protectTranslationStructure(text) {
     
     // 코드블럭 밖의 정규식 트리거용 구분선도 원문 그대로 보존한다.
     protectedText = protectedText.replace(
-        /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm,
+        dividerLineRegex('gm'),
         (value) => addToken(value, 'whole-line')
     );
     
@@ -556,7 +575,8 @@ export function restoreTranslationStructure(text, protection, options = {}) {
         ok: true,
         text: validation.text,
         reason: null,
-        boundaryRecovery: validation.boundaryRecovery || null
+        boundaryRecovery: validation.boundaryRecovery || null,
+        softNote: validation.softNote || null
     };
 }
 
@@ -612,7 +632,9 @@ export function validateTranslationStructure(source, output, options = {}) {
     const validationText = options.allowBilingualMacroCopies === true
         ? normalizeBilingualMacroCopiesForValidation(normalized.text)
         : normalized.text;
-    const parity = compareProtectedStructure(sourceText, validationText);
+    const parity = compareProtectedStructure(sourceText, validationText, {
+        blockDividerGrowth: options.sourceTruncated === true
+    });
     if (!parity.ok) {
         const recovered = recoverBoundaryContextLeak(sourceText, normalized.text);
         if (recovered) {
@@ -697,21 +719,22 @@ function countCompleteBoundaryFenceBlocks(fragment) {
     return completeBlocks.length;
 }
 
-function compareProtectedStructure(source, output) {
+function compareProtectedStructure(source, output, options = {}) {
     const sourceSignature = getStructureSignature(source);
     const outputSignature = getStructureSignature(output);
-    if (sourceSignature.length !== outputSignature.length) {
-        // 🚨 beta.4: 구분선 요소만 빠진 경우(감소 ≤2, 나머지 요소 동일) 소프트 허용
-        const isDivider = (el) => /^(?:-{3,}|_{3,}|\*{3,})$/.test(String(el).trim());
-        const srcRest = sourceSignature.filter(el => !isDivider(el));
-        const outRest = outputSignature.filter(el => !isDivider(el));
-        const srcDiv = sourceSignature.length - srcRest.length;
-        const outDiv = outputSignature.length - outRest.length;
-        if (srcRest.length === outRest.length && srcRest.every((el, i) => el === outRest[i]) &&
-            outDiv < srcDiv && outDiv >= srcDiv - 2) {
-            console.warn(`[CAT] ⚠️ 구분선 요소 ${srcDiv}→${outDiv} 감소 — 소프트 허용`);
-            return { ok: true, reason: null };
-        }
+    // 🚨 beta.5: 구분선(-{3,} 등) 요소는 "느슨한 축"으로 분리한다.
+    // 구분선 하나 어긋났다고 번역 전체를 폐기하는 형벌 과잉이 실사용 오류의
+    // 주범이었음(8→7, 8→9, 0→5 실측). 구분선은 개수 증감 모두 소프트 허용하고,
+    // 펜스/태그/매크로 같은 "진짜 깨지면 안 되는 축"만 엄격 검증을 유지한다.
+    // 예외: 절단된 소스에서 구분선 '증가'는 모델이 절단점 너머를 창작한
+    // 카나리아이므로 하드 실패 유지 → 절단점 준수 재시도가 발동하게 한다.
+    const srcRest = sourceSignature.filter(el => !isDividerElement(el));
+    const outRest = outputSignature.filter(el => !isDividerElement(el));
+    const srcDiv = sourceSignature.length - srcRest.length;
+    const outDiv = outputSignature.length - outRest.length;
+    let softNote = null;
+
+    if (srcRest.length !== outRest.length) {
         const srcAudit = auditDividerLines(source);
         const outAudit = auditDividerLines(output);
         return {
@@ -722,15 +745,26 @@ function compareProtectedStructure(source, output) {
                 (srcAudit.nearMiss.length ? `\n⚠️ 원문의 매칭 실패 유사 구분선:\n${srcAudit.nearMiss.slice(0, 5).join('\n')}` : '')
         };
     }
-    for (let i = 0; i < sourceSignature.length; i++) {
-        if (sourceSignature[i] !== outputSignature[i]) {
+    if (srcDiv !== outDiv) {
+        if (outDiv > srcDiv && options.blockDividerGrowth) {
+            return {
+                ok: false,
+                reason: `구조 요소 개수 불일치: ${sourceSignature.length}→${outputSignature.length}`,
+                detail: `절단된 원문에서 구분선이 ${srcDiv}→${outDiv}로 늘어남 — 절단점 너머 창작 의심`
+            };
+        }
+        softNote = `구분선 ${srcDiv}→${outDiv} ${outDiv < srcDiv ? '감소' : '증가'} — 소프트 허용 (번역 유지)`;
+        console.warn(`[CAT] ⚠️ ${softNote}`);
+    }
+    for (let i = 0; i < srcRest.length; i++) {
+        if (srcRest[i] !== outRest[i]) {
             // 🚨 beta.3: {{User}}↔{{user}}처럼 대소문자만 다른 매크로는 ST가 동일하게
             // 치환하므로 구조 변경으로 취급하지 않는다 (모델의 케이스 통일 습관 흡수)
-            const isMacroPair = /^\{\{[\s\S]*\}\}$/.test(sourceSignature[i]) &&
-                /^\{\{[\s\S]*\}\}$/.test(outputSignature[i]) &&
-                sourceSignature[i].toLowerCase() === outputSignature[i].toLowerCase();
+            const isMacroPair = /^\{\{[\s\S]*\}\}$/.test(srcRest[i]) &&
+                /^\{\{[\s\S]*\}\}$/.test(outRest[i]) &&
+                srcRest[i].toLowerCase() === outRest[i].toLowerCase();
             if (isMacroPair) continue;
-            return { ok: false, reason: `구조 요소 변경: ${sourceSignature[i]}→${outputSignature[i]}` };
+            return { ok: false, reason: `구조 요소 변경: ${srcRest[i]}→${outRest[i]}` };
         }
     }
     
@@ -777,7 +811,7 @@ function compareProtectedStructure(source, output) {
             return { ok: false, reason: `구조 요소 위치 변경 (${i + 1}구간)` };
         }
     }
-    return { ok: true, reason: null };
+    return { ok: true, reason: null, softNote };
 }
 
 function getStructureSignature(text) {
@@ -789,7 +823,7 @@ function getStructureMatches(text) {
     const patterns = [
         /```[^\n]*/g,
         /<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}/g,
-        /^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm
+        dividerLineRegex('gm')
     ];
     patterns.forEach((pattern) => {
         for (const match of String(text || '').matchAll(pattern)) {
@@ -870,8 +904,11 @@ function repairStructuredKeyPrefixes(source, output) {
 
 function getStructureLayout(text) {
     const source = String(text || '');
+    // 🚨 beta.5: 구분선은 소프트 축으로 이동 → 배치(layout) 검사에서도 제외.
+    // 포함된 채로 두면 구분선 개수가 소프트 허용으로 통과한 케이스가
+    // 여기서 "배치 개수 불일치"로 다시 죽는 이중 처벌이 발생한다.
     const regions = [...source.matchAll(
-        /```[^\n]*\n[\s\S]*?```|<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}|^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm
+        /```[^\n]*\n[\s\S]*?```|<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}/g
     )];
     const contentGaps = [];
     let cursor = 0;
@@ -990,7 +1027,7 @@ function balanceQuotes(text, originalText) {
     // 🚨 beta.3: 구조 잠금 원문(펜스/태그/구분선)에서는 따옴표 자동 복구를 건너뛴다.
     // '"'+text 프리펜드가 첫 줄 구분선을 “--- 로 오염시켜 구조 검증을 깨뜨렸음(구분선 8→7 사건).
     // 코스메틱 복구보다 구조 보존이 우선이고, 구조는 어차피 뒤의 검증이 지킨다.
-    if (originalText && (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || /^(?:-{3,}|_{3,}|\*{3,})[\t \u00A0]*$/m.test(originalText))) {
+    if (originalText && (/```/.test(originalText) || /<\/?[a-zA-Z][^>]*>/.test(originalText) || dividerLineRegex('m').test(originalText))) {
         return text;
     }
     // 🚨 beta.3: 원문 자체가 ASCII 따옴표 홀수면(절단 메시지 등) 번역의 홀수도 정상 — 복구하지 않음
