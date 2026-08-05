@@ -689,9 +689,11 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
 
     try {
         let result = ""; let thought = null;
-        // 🚨 beta.3 디버그: 재시도 재귀에서는 시도 이력을 이어받는다 (최초 호출에서만 리셋)
-    const inheritedAttempts = (retryReason && Array.isArray(_lastDebugLog.attempts)) ? _lastDebugLog.attempts : [];
-    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts };
+        // 🚨 beta.4: 시도 이력 상속은 '같은 원문의 재시도'일 때만 — 재시도 여부만 보면
+    // 다른 메시지의 이력이 섞여 들어옴 (2:13 로그에서 실제 오염 관측)
+    const currentRunKey = hashScopeValue(text);
+    const inheritedAttempts = (retryReason && _lastDebugLog.runKey === currentRunKey && Array.isArray(_lastDebugLog.attempts)) ? _lastDebugLog.attempts : [];
+    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts, runKey: currentRunKey };
         
         if (settings.profile && stContext.ConnectionManagerRequestService) {
             // 🚨 프로필 모드: systemInstruction 미지원 → 유저 메시지에 합침
@@ -1367,9 +1369,18 @@ export function validateTranslationPayload(output, originalText, settings, targe
             ? normalizeBilingualMacroCopiesForValidation(natural)
             : natural;
     const outputStructure = countOutputStructure(structureCheckedNatural);
-    if (sourceStructure.fences !== outputStructure.fences ||
+    // 🚨 beta.4: 구분선 '감소'만 소프트 허용 — 하나 빠진 건 미용상 흠집인데
+    // 번역 전체 사망은 형벌 과잉. '증가'는 창작(엔딩 지어내기)의 카나리아라 하드 유지.
+    const dividerOnlyLoss = sourceStructure.fences === outputStructure.fences &&
+        sourceStructure.tags === outputStructure.tags &&
+        outputStructure.rules < sourceStructure.rules &&
+        outputStructure.rules >= sourceStructure.rules - 2;
+    if (dividerOnlyLoss) {
+        console.warn(`[CAT] ⚠️ 구분선 ${sourceStructure.rules}→${outputStructure.rules} 감소 — 소프트 허용 (번역 유지)`);
+    }
+    if (!dividerOnlyLoss && (sourceStructure.fences !== outputStructure.fences ||
         sourceStructure.tags !== outputStructure.tags ||
-        sourceStructure.rules !== outputStructure.rules) {
+        sourceStructure.rules !== outputStructure.rules)) {
         return {
             ok: false,
             reason: `구조 개수 불일치: 펜스 ${sourceStructure.fences}→${outputStructure.fences}, 태그 ${sourceStructure.tags}→${outputStructure.tags}, 구분선 ${sourceStructure.rules}→${outputStructure.rules}`,

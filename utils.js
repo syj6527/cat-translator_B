@@ -60,6 +60,8 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
+export const CAT_BETA_VERSION = '1.1.2-beta.4';
+
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
     
@@ -699,6 +701,17 @@ function compareProtectedStructure(source, output) {
     const sourceSignature = getStructureSignature(source);
     const outputSignature = getStructureSignature(output);
     if (sourceSignature.length !== outputSignature.length) {
+        // 🚨 beta.4: 구분선 요소만 빠진 경우(감소 ≤2, 나머지 요소 동일) 소프트 허용
+        const isDivider = (el) => /^(?:-{3,}|_{3,}|\*{3,})$/.test(String(el).trim());
+        const srcRest = sourceSignature.filter(el => !isDivider(el));
+        const outRest = outputSignature.filter(el => !isDivider(el));
+        const srcDiv = sourceSignature.length - srcRest.length;
+        const outDiv = outputSignature.length - outRest.length;
+        if (srcRest.length === outRest.length && srcRest.every((el, i) => el === outRest[i]) &&
+            outDiv < srcDiv && outDiv >= srcDiv - 2) {
+            console.warn(`[CAT] ⚠️ 구분선 요소 ${srcDiv}→${outDiv} 감소 — 소프트 허용`);
+            return { ok: true, reason: null };
+        }
         const srcAudit = auditDividerLines(source);
         const outAudit = auditDividerLines(output);
         return {
