@@ -1032,6 +1032,22 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
         }
         
+        // 🚨 beta.6: 병기 모드 한정 — 검증 전에 자동 조립을 시도한다.
+        // 모델이 영어를 빠뜨린 대사를 원문에서 복원해 STRICT_OK로 통과시키고,
+        // 조립 불가(개수 불일치 등)면 원본 그대로라 기존 강등 경로로 폴백된다.
+        // 직역 병기 섹션(<<<CAT_LITERAL>>>)은 분리해서 natural에만 조립을 적용
+        // — 직역 섹션의 따옴표가 카운트/정렬에 섞여 들어가는 오염을 차단.
+        if ((settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean') {
+            const splitForRepair = splitLiteralAppendix(cleaned);
+            const repairedNatural = repairBilingualByAlignment(text, splitForRepair.natural || '');
+            if (repairedNatural !== (splitForRepair.natural || '')) {
+                cleaned = splitForRepair.literal
+                    ? `${repairedNatural}\n<<<CAT_LITERAL>>>\n${splitForRepair.literal}`
+                    : repairedNatural;
+                recordSoftNote('병기 자동 조립 — 누락된 영어 원문 복원');
+            }
+        }
+
         const validation = validateTranslationPayload(cleaned, text, settings, targetLang);
         if (!validation.ok) {
             return await retryRejectedTranslation(validation.reason, null, validation.detail, cleaned);
@@ -1311,6 +1327,66 @@ function collectQuotedSegmentsOutsideFences(text) {
         }
     }
     return segments.sort((a, b) => a.index - b.index);
+}
+
+// 🚨 beta.6: 한영 병기 자동 조립 (Auto-Repair by Alignment)
+// 모델이 영어 원문을 빼먹고 한국어로만 번역한 대사를, 코드가 보유한 원문 영어와
+// 짝지어 "영어 [한국어]" 형태로 결정론적 복원한다. 영어를 추측하지 않고 원문에서
+// 그대로 가져오므로 안전하다. 단, 아래 게이트를 모두 통과할 때만 조립하고,
+// 하나라도 어긋나면 원본을 그대로 반환해 기존 강등 경로로 폴백한다.
+//   G1. 원문 영어 대사 존재
+//   G2. 원문 대사 수 == 출력 인용구 수 (1:1 정렬 보장, 누락/분할이면 폴백)
+//   G3. 같은 순번의 구분자(따옴표 종류) 호환
+//   G4. 출력이 미번역(영어 그대로)이 아니고, 한글이 존재
+// 개행 안전: 전역 재탐색 없이 수집된 offset 기준으로 뒤에서부터 치환한다.
+function repairBilingualByAlignment(original, output) {
+    const src = collectQuotedSegmentsOutsideFences(original).filter(s => /[A-Za-z]/.test(s.content));
+    const out = collectQuotedSegmentsOutsideFences(output);
+    if (src.length === 0) return output;                 // G1
+    if (src.length !== out.length) return output;        // G2
+
+    const canon = v => String(v || '')
+        .replace(/[’‘]/g, "'").replace(/…/g, '...').replace(/[—–]/g, '-')
+        .replace(/\s+/g, ' ').trim();
+    const delims = {
+        double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
+    };
+    const repairs = [];
+
+    for (let i = 0; i < src.length; i++) {
+        const s = src[i], o = out[i];
+        if (s.type !== o.type) return output;            // G3: 구분자 불일치 → 폴백
+        // G5: 세그먼트가 개행을 포함하면(따옴표 불균형으로 문단을 걸친 가짜 세그먼트)
+        //     전체 폴백 — 오늘 확정된 문단 삼킴 계열 사고를 구조적으로 차단.
+        if (/\n/.test(s.content) || /\n/.test(o.content)) return output;
+        if (s.content.length > 500 || o.content.length > 500) return output;
+        // 이미 정상 병기(영어 [한국어])면 건드리지 않음
+        const already = o.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
+        if (already && canon(already[1]) === canon(s.content)) continue;
+        // 미번역(출력이 영어 원문 그대로) → 조립 대상 아님
+        if (canon(o.content) === canon(s.content)) continue;
+        const hasKorean = /[가-힣]/.test(o.content);
+        const looksLikeEnglishLeftover =
+            canon(s.content).length >= 15 && canon(o.content).includes(canon(s.content).slice(0, 15));
+        if (!hasKorean || looksLikeEnglishLeftover) return output; // G4: 애매 → 전체 폴백
+        // 부분 괄호가 있으면 그 한글만, 아니면 출력 전체를 한국어로 취급
+        const partial = o.content.match(/\[([^\]]*[가-힣][^\]]*)\]/);
+        const cleanKo = (partial ? partial[1] : o.content).replace(/^\[|\]$/g, '').trim();
+        const [opener, closer] = delims[o.type] || ['"', '"'];
+        repairs.push({
+            index: o.index,
+            len: o.content.length + opener.length + closer.length,
+            replacement: `${opener}${s.content} [${cleanKo}]${closer}`
+        });
+    }
+    if (repairs.length === 0) return output;
+    let result = output;
+    repairs.sort((a, b) => b.index - a.index); // 뒤에서부터 치환 → 앞 치환이 뒤 offset을 밀지 않음
+    for (const r of repairs) {
+        result = result.slice(0, r.index) + r.replacement + result.slice(r.index + r.len);
+    }
+    console.log(`[CAT] 🔧 병기 자동 조립: ${repairs.length}개 대사 원문 복원`);
+    return result;
 }
 
 function validateKoEnBilingualDialogue(original, output) {
