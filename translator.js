@@ -596,6 +596,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     });
 
     const acceptTranslation = async (acceptedOutput, acceptedThought = null) => {
+        // 🚨 beta.9.1(로그): 성공 확정 시 이전 시도의 에러 스탬프 제거 — '중단됨'인데 성공 표시되던 혼동 해소
+        _lastDebugLog.error = null;
         const accepted = splitLiteralAppendix(acceptedOutput);
         await setCached(
             text,
@@ -718,7 +720,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     // 다른 메시지의 이력이 섞여 들어옴 (2:13 로그에서 실제 오염 관측)
     const currentRunKey = hashScopeValue(text);
     const inheritedAttempts = (retryReason && _lastDebugLog.runKey === currentRunKey && Array.isArray(_lastDebugLog.attempts)) ? _lastDebugLog.attempts : [];
-    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts, runKey: currentRunKey };
+    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: '(요청 진행 중 — 응답 대기. 이 문구가 계속 보이면 API/프록시가 응답을 안 준 것)', thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts, runKey: currentRunKey };
         
         if (settings.profile && stContext.ConnectionManagerRequestService) {
             // 🚨 프로필 모드: systemInstruction 미지원 → 유저 메시지에 합침
