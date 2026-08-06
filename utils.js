@@ -86,8 +86,12 @@ export function cleanResult(text, originalText = null, structureProtection = nul
     
     // 🚨 beta.3: CRLF/단독 CR 정규화 — 모델·프로필 경유 응답에 \r이 섞이면
     // 행 단위 정규식(구분선 카운트 등)이 통째로 미끄러진다. 모든 후처리의 관문에서 통일.
+    // 🚨 beta.5: NFC 정규화 추가 — 모델이 자모 분해형(NFD)으로 한글을 뱉으면
+    // ① 화면에서 받침이 분리되어 보이고(받침 무너짐 증상) ② 가-힣 정규식이
+    // 전부 미끄러져 언어 감지/병기/말투 수집이 연쇄 오작동한다. 관문에서 통일.
+    // 이미 NFC인 텍스트에는 무영향(멱등), CATFMT 토큰은 ASCII라 무영향.
     // AI가 앞에 붙이는 "번역:" 등 접두어 제거
-    let cleaned = String(text).replace(/\r\n?/g, '\n');
+    let cleaned = String(text).normalize('NFC').replace(/\r\n?/g, '\n');
     const responsePrefix = /^(번역|Translation|Output|Input|Result):\s*/i;
     if (!originalText || !responsePrefix.test(originalText.trimStart())) {
         cleaned = cleaned.replace(responsePrefix, "");

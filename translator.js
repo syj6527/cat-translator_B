@@ -1463,7 +1463,7 @@ export function validateTranslationPayload(output, originalText, settings, targe
     const dividerOnlyDiff = sourceStructure.fences === outputStructure.fences &&
         sourceStructure.tags === outputStructure.tags &&
         sourceStructure.rules !== outputStructure.rules &&
-        !(outputStructure.rules > sourceStructure.rules && detectTruncatedSource(original));
+        !(outputStructure.rules > sourceStructure.rules && detectTruncatedSource(originalText));
     if (dividerOnlyDiff) {
         dividerSoftNote = `구분선 ${sourceStructure.rules}→${outputStructure.rules} ` +
             `${outputStructure.rules < sourceStructure.rules ? '감소' : '증가'} — 소프트 허용 (번역 유지)`;
