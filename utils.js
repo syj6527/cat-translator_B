@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.2-beta.6';
+export const CAT_BETA_VERSION = '1.1.2-beta.8';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -456,10 +456,11 @@ export function normalizeBilingualMacroCopiesForValidation(text) {
     const normalizeQuotes = (segment) => {
         let normalized = segment;
         const quotePatterns = [
-            { regex: /"([^"]*)"/g, open: '"', close: '"' },
-            { regex: /“([^”]*)”/g, open: '“', close: '”' },
-            { regex: /「([^」]*)」/g, open: '「', close: '」' },
-            { regex: /『([^』]*)』/g, open: '『', close: '』' }
+            // 🚨 beta.7: 개행 금지 — 따옴표 어긋남이 문단을 걸치는 오탐 차단
+            { regex: /"([^"\n]*)"/g, open: '"', close: '"' },
+            { regex: /“([^”\n]*)”/g, open: '“', close: '”' },
+            { regex: /「([^」\n]*)」/g, open: '「', close: '」' },
+            { regex: /『([^』\n]*)』/g, open: '『', close: '』' }
         ];
         for (const { regex, open, close } of quotePatterns) {
             normalized = normalized.replace(

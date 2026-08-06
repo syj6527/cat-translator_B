@@ -1309,16 +1309,27 @@ function postProcessBilingualText(text, bilingualMode) {
 function collectQuotedSegmentsOutsideFences(text) {
     const source = String(text || '');
     const masked = source
-        .replace(/```[^\n]*\n[\s\S]*?```/g, match => ' '.repeat(match.length))
-        .replace(/<\/?[a-zA-Z][^>]*>/g, match => ' '.repeat(match.length))
+        // 🚨 beta.7: 마스킹 시 개행은 보존 — 공백으로만 바꾸면 펜스/태그를 관통해
+        // 한 줄처럼 이어지는 가짜 인용구가 생길 수 있음
+        .replace(/```[^\n]*\n[\s\S]*?```/g, match => match.replace(/[^\n]/g, ' '))
+        .replace(/<\/?[a-zA-Z][^>]*>/g, match => match.replace(/[^\n]/g, ' '))
         // 🚨 beta.3: 작가 오타(“…")·모델 정규화("…”)로 커리/스트레이트가 섞이면
         // 짝맞추기가 통째로 밀리므로 수집 단계에서 통일 (1:1 치환이라 index 불변)
-        .replace(/[“”]/g, '"');
+        .replace(/[“”]/g, '"')
+        // 🚨 beta.7: 치수 표기(6'5", 12")의 인치 기호를 대사 따옴표로 오인해
+        // 서술 여러 문단을 가짜 대사로 수집하던 실측 사고 차단 — 숫자 바로 뒤의
+        // 따옴표는 더블프라임으로 마스킹 (1:1 치환, index 불변).
+        // 트레이드오프: "I am 25" 처럼 숫자로 끝나는 진짜 대사는 미수집 → 검증 스킵
+        // (관대한 방향의 실패라 안전).
+        .replace(/(\d)"/g, '$1\u2033');
     const patterns = [
-        { type: 'double', regex: /"([^"]*)"/g },
-        { type: 'curly', regex: /“([^”]*)”/g },
-        { type: 'corner', regex: /「([^」]*)」/g },
-        { type: 'white-corner', regex: /『([^』]*)』/g }
+        // 🚨 beta.7: 전 패턴 개행 금지 — 실제 대사는 한 줄. 따옴표 하나가 어긋나도
+        // 문단을 걸치는 가짜 세그먼트가 구조적으로 생기지 않게 한다.
+        // (멀티라인 인용은 미수집 → 검증 스킵, 관대한 방향)
+        { type: 'double', regex: /"([^"\n]*)"/g },
+        { type: 'curly', regex: /“([^”\n]*)”/g },
+        { type: 'corner', regex: /「([^」\n]*)」/g },
+        { type: 'white-corner', regex: /『([^』\n]*)』/g }
     ];
     const segments = [];
     for (const { type, regex } of patterns) {
@@ -1360,9 +1371,22 @@ function repairBilingualByAlignment(original, output) {
         //     전체 폴백 — 오늘 확정된 문단 삼킴 계열 사고를 구조적으로 차단.
         if (/\n/.test(s.content) || /\n/.test(o.content)) return output;
         if (s.content.length > 500 || o.content.length > 500) return output;
-        // 이미 정상 병기(영어 [한국어])면 건드리지 않음
-        const already = o.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
-        if (already && canon(already[1]) === canon(s.content)) continue;
+        // 이미 병기 형태(… [한국어])인 경우 — 괄호 앞 공백 유무 무관하게 인정
+        const already = o.content.match(/^([\s\S]*?)\s*\[([^\]]*[가-힣][^\]]*)\]\s*$/);
+        if (already) {
+            const wellSpaced = /\s\[/.test(o.content);
+            if (canon(already[1]) === canon(s.content) && wellSpaced) continue; // STRICT_OK
+            // 🚨 beta.7: 영어 슬롯이 원문과 다름(모델이 쉼표→마침표 등 문장부호를
+            // 바꾼 표류). 복원을 포기하면 검증기가 exact 불일치로 폐기하므로,
+            // 영어 슬롯만 원문으로 교체해 결정론적으로 맞춘다.
+            const [op2, cl2] = delims[o.type] || ['"', '"'];
+            repairs.push({
+                index: o.index,
+                len: o.content.length + op2.length + cl2.length,
+                replacement: `${op2}${s.content} [${already[2].trim()}]${cl2}`
+            });
+            continue;
+        }
         // 미번역(출력이 영어 원문 그대로) → 조립 대상 아님
         if (canon(o.content) === canon(s.content)) continue;
         const hasKorean = /[가-힣]/.test(o.content);

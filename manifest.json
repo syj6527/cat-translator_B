@@ -1,7 +1,7 @@
 {
     "name": "cat-translator-beta",
     "display_name": "🙀 Translator Beta",
-    "version": "1.1.2-beta.6",
+    "version": "1.1.2-beta.8",
     "description": "🙀 Translator Beta: 맞춤형 튜닝 UI & 스마트 자동번역",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
