@@ -507,6 +507,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             if (!silent) {
                 catNotify(`${getThemeEmoji()} 원문이 이미 ${targetLang === 'Korean' ? '한국어' : targetLang === 'English' ? '영어' : targetLang}입니다! 목표 언어를 확인해주세요!`, "warning");
             }
+            // 🚨 beta.9.2(로그): 이 조기 종료는 _lastDebugLog 초기화보다 앞이라
+            // 디버그 로그에 흔적이 안 남았음("조용히 꺼짐"의 정체). 생략 사유를 스탬프.
+            _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '생략(같은 언어)', model: '', prompt: '', rawResponse: '', cleaned: '', error: `같은 언어 판정으로 번역 생략 (원문=목표=${targetLang}) — API 호출 없음`, thought: null, recovery: null };
             return null;
         }
     }

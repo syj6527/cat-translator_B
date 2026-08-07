@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.2-beta.9.1';
+export const CAT_BETA_VERSION = '1.1.2-beta.9.2';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -1208,7 +1208,13 @@ export function getInputTargetLanguage(settings = {}) {
 
 export function resolveInputTranslationDirection(text, settings = {}) {
     const analysis = analyzeLanguage(text);
-    const targetLang = getInputTargetLanguage(settings);
+    let targetLang = getInputTargetLanguage(settings);
+    // 🚨 beta.9.2: 양방향(ko-en) 입력 방향 전환 복원 — 입력이 이미 목표 언어(영어)면
+    // "그대로 전송"으로 중단하지 않고 반대 방향(한국어)으로 번역한다.
+    // 양방향 off일 때는 기존 동작(같은 언어 → 전송 안내) 유지.
+    if ((settings.bidirectional || 'off') === 'ko-en' && isClearlyLanguage(analysis, targetLang)) {
+        targetLang = targetLang === 'English' ? 'Korean' : 'English';
+    }
     return {
         targetLang,
         sourceLanguage: analysis.dominant,
