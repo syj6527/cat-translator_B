@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.2-beta.9.2';
+export const CAT_BETA_VERSION = '1.1.4-beta.1';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -323,6 +323,66 @@ function getSegmentByMarkers(text, markers, targetIndex) {
 
 // 🚨 beta.3: "직전 토큰에 공백 없이 붙은 짧은 한국어 꼬리"인지 판정 (조사+서술어 SOV 이동분)
 // 첫 글자가 한글이어야 함 = 앞 토큰에 조사로 직결. 공백/줄바꿈으로 시작하면 진짜 밀림이므로 불허.
+// 🚨 v1.1.4: 소유격 매크로 어순 재배치 공용 판정 코어 (A′ 구조).
+// 세그먼트 검증과 레이아웃 검증이 같은 재배치를 각각 잡는 이중 구조라,
+// 예외 정책을 이 한 곳에만 두고 양쪽 래퍼가 부품만 추출해 전달한다.
+// 개행 함정: \s 금지, 수평 공백 [ \t]만 허용.
+function isSafeLeadingPossessiveReorderParts({ sourceBefore, sourceAfter, outputBefore, outputAfter, structureValue, structureType }) {
+    // 실제 {{macro}}만 허용 — fence/tag/comment/whole-line 거부
+    if (structureType !== 'macro') return false;
+    if (!/^\{\{[^{}\r\n]+\}\}$/.test(String(structureValue || ''))) return false;
+    // 출력 선행 구간은 수평 공백만
+    if (!/^[ \t]*$/.test(String(outputBefore || ''))) return false;
+    const src0 = String(sourceBefore || '');
+    // 원문 선행 구간: 개행/완결 문장 금지, 길이 제한
+    if (/[\r\n]/.test(src0)) return false;
+    if (src0.length > 160) return false;
+    if (/[.!?]["'’)\]]*[ \t]+/.test(src0)) return false;
+    // 소유격 지문: 원문 매크로 직후 's, 출력 매크로 직후 조사 '의'
+    if (!/^[ \t]*['’]s\b/i.test(String(sourceAfter || ''))) return false;
+    if (!/^의(?:[가-힣A-Za-z0-9]|[ \t])/.test(String(outputAfter || ''))) return false;
+    return true;
+}
+
+// 세그먼트 검증용 래퍼: 첫 마커 앞뒤 구간 + 첫 토큰 정보 전달
+function isSafeLeadingPossessiveMacroReorder(protection, output) {
+    const markers = protection.expectedMarkers;
+    if (!Array.isArray(markers) || markers.length < 1) return false;
+    const firstToken = protection.tokens.find(token => token.marker === markers[0]);
+    if (!firstToken) return false;
+    const isMacro = firstToken.type === 'inline' && /^\{\{[^{}\r\n]+\}\}$/.test(firstToken.value);
+    return isSafeLeadingPossessiveReorderParts({
+        sourceBefore: getSegmentByMarkers(protection.text, markers, 0),
+        sourceAfter: getSegmentByMarkers(protection.text, markers, 1),
+        outputBefore: getSegmentByMarkers(output, markers, 0),
+        outputAfter: getSegmentByMarkers(output, markers, 1),
+        structureValue: firstToken.value,
+        structureType: isMacro ? 'macro' : firstToken.type
+    });
+}
+
+// 레이아웃 검증용 래퍼: 첫 region 앞뒤 구간 + region 값/종류 전달
+// (캐시·fallback 경로는 세그먼트 검증 없이 validateTranslationStructure를 직접
+//  호출하므로, 레이아웃 쪽에도 같은 코어를 적용해야 반쪽 수정이 되지 않는다)
+function isSafeLeadingPossessiveLayoutReorder(source, output) {
+    const srcRegions = getStructureMatches(String(source || ''));
+    const outRegions = getStructureMatches(String(output || ''));
+    if (!srcRegions.length || !outRegions.length) return false;
+    const s0 = srcRegions[0], o0 = outRegions[0];
+    // 양쪽 첫 요소가 같은 매크로여야 함
+    if (s0.value !== o0.value) return false;
+    const type = /^\{\{[\s\S]*\}\}$/.test(s0.value) ? 'macro'
+        : s0.value.startsWith('```') ? 'fence' : 'tag';
+    return isSafeLeadingPossessiveReorderParts({
+        sourceBefore: String(source).slice(0, s0.index),
+        sourceAfter: String(source).slice(s0.end),
+        outputBefore: String(output).slice(0, o0.index),
+        outputAfter: String(output).slice(o0.end),
+        structureValue: s0.value,
+        structureType: type
+    });
+}
+
 function isKoreanTailSegment(segment) {
     return /^[가-힣][가-힣\s,.!?…~'’"”-]{0,39}$/.test(String(segment || ''));
 }
@@ -547,6 +607,11 @@ export function restoreTranslationStructure(text, protection, options = {}) {
                 // 짧은 한국어 꼬리"뿐이면 블록 밀림이 아니므로 통과시킨다.
                 if (!protection.segmentPattern[i] && outPattern[i] && i > 0 &&
                     isKoreanTailSegment(getSegmentByMarkers(validationOutput, protection.expectedMarkers, i))) {
+                    continue;
+                }
+                // 🚨 v1.1.4: 첫 구간 소유격 매크로 어순 재배치 (원문 있음→출력 빈 구간, i===0)
+                if (i === 0 && protection.segmentPattern[0] && !outPattern[0] &&
+                    isSafeLeadingPossessiveMacroReorder(protection, validationOutput)) {
                     continue;
                 }
                 const kind = protection.segmentPattern[i] ? '구간 내용 소실' : '빈 구간에 텍스트 침입';
@@ -813,6 +878,13 @@ function compareProtectedStructure(source, output, options = {}) {
     }
     for (let i = 0; i < sourceLayout.contentGaps.length; i++) {
         if (sourceLayout.contentGaps[i] !== outputLayout.contentGaps[i]) {
+            // 🚨 v1.1.4: gap 0의 검증된 소유격 매크로 재배치만 면제.
+            // 캐시·fallback 경로는 세그먼트 검증 없이 이 함수를 직접 호출하므로
+            // 여기서도 같은 공용 코어로 판정해야 정상 캐시가 폐기되지 않는다.
+            // gap 1 이후 mismatch·region 불일치·코드블럭 검사는 전부 그대로 유지.
+            if (i === 0 && isSafeLeadingPossessiveLayoutReorder(source, output)) {
+                continue;
+            }
             return { ok: false, reason: `구조 요소 위치 변경 (${i + 1}구간)` };
         }
     }
