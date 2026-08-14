@@ -553,6 +553,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
 
     // 구조 토큰을 지키지 못하는 모델은 검증 실패 후 구버전 호환 경로로 한 번 재시도한다.
     const sourceText = text.trim();
+    // 🚨 v1.1.4-beta.2 (C): 설정의 사용자 추가 CoT 태그 목록을 수집기에 동기화
+    syncCotMaskTags(settings.cotMaskTags);
     const structureProtection = _structureFallback
         ? {
             text: sourceText,
@@ -660,8 +662,19 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 /구조 토큰 중복/.test(reason) ||
                 (growthMatch && parseInt(growthMatch[2], 10) > parseInt(growthMatch[1], 10))
             );
+            // 🚨 v1.1.4-beta.2 (F): 펜스·태그·매크로·코드행·들여쓰기 같은 임계 구조가
+            // 있으면 legacy 폴백(토큰 보호 해제) 금지. 1차에서 토큰을 못 지킨 모델에게
+            // 2차에 보호까지 벗겨 원본 구조를 맡기면 태그/펜스를 실제로 소실시켜
+            // "구조 요소 개수 불일치: 19→16" 계열 최종 실패가 되던 것이 실측 재현됨.
+            // 폴백 대신 보호 유지 재시도를 타면 reason에 누락 마커가 이미 명시돼
+            // ("구조 토큰 누락: @@CATFMT_0003@@") 모델이 정확한 교정 지시를 받는다.
+            // 검증 완화가 아니라 위험한 무보호 경로만 차단하는 수정.
+            const CRITICAL_TOKEN_TYPES = ['fence', 'inline', 'code-line', 'indent'];
+            const hasCriticalStructure = Array.isArray(structureProtection.tokens) &&
+                structureProtection.tokens.some(token => CRITICAL_TOKEN_TYPES.includes(token.type));
             let useStructureFallback = !inventedBeyondCutoff && !_structureFallback &&
                 structureProtection.hasStructure &&
+                !hasCriticalStructure &&
                 isStructureCompatibilityFailure(reason);
             const nextRetryReason = inventedBeyondCutoff
                 ? 'You added content beyond the cutoff of the truncated source (extra dividers/sections). The source ends mid-sentence by design. Translate only up to that exact cutoff and stop there. Ending abruptly is correct.'
@@ -1311,12 +1324,58 @@ function postProcessBilingualText(text, bilingualMode) {
     });
 }
 
+// 🚨 v1.1.4-beta.2 (C): CoT 컨테이너 태그 기본 목록.
+// 화면 숨김 정규식(promptOnly/markdownOnly)은 msg.mes 원본을 안 바꾸므로,
+// 프리셋이 심은 CoT 블록이 번역기에는 그대로 보인다. 그 안의 "대사 초안" 인용문을
+// 수집기가 병기 대상 대사로 오인 → 검증 실패·조립 게이트 차단·강등의 근본 원인.
+// 태그 '마크업'만 지우던 기존 방식과 달리 이 목록의 태그는 '내용까지' 통째로 마스킹한다.
+// REVISION_CHECK·Facts는 실사용 제보 프리셋에서 실물 확보된 태그명.
+// 새 프리셋에서 다른 태그명이 발견되면 설정 cotMaskTags(쉼표 구분)로 추가 가능.
+const DEFAULT_COT_MASK_TAGS = ['thinking', 'think', 'thought', 'reasoning', 'cot', 'analysis', 'REVISION_CHECK', 'Facts'];
+let _extraCotMaskTags = [];
+
+// fetchTranslation 진입 시 settings.cotMaskTags(쉼표 구분 문자열)를 동기화한다.
+// 태그명은 영숫자·_·- 만 허용해 정규식 인젝션을 차단한다.
+export function syncCotMaskTags(rawList) {
+    _extraCotMaskTags = String(rawList || '')
+        .split(',')
+        .map(tag => tag.trim().replace(/[^A-Za-z0-9_-]/g, ''))
+        .filter(tag => tag.length > 0);
+}
+
+function getActiveCotMaskTags() {
+    return _extraCotMaskTags.length ? DEFAULT_COT_MASK_TAGS.concat(_extraCotMaskTags) : DEFAULT_COT_MASK_TAGS;
+}
+
 function collectQuotedSegmentsOutsideFences(text) {
     const source = String(text || '');
-    const masked = source
-        // 🚨 beta.7: 마스킹 시 개행은 보존 — 공백으로만 바꾸면 펜스/태그를 관통해
-        // 한 줄처럼 이어지는 가짜 인용구가 생길 수 있음
-        .replace(/```[^\n]*\n[\s\S]*?```/g, match => match.replace(/[^\n]/g, ' '))
+    // 🚨 beta.7: 마스킹 시 개행은 보존 — 공백으로만 바꾸면 펜스/태그를 관통해
+    // 한 줄처럼 이어지는 가짜 인용구가 생길 수 있음 (아래 모든 마스킹 공통 원칙)
+    const blankKeepNewlines = segment => segment.replace(/[^\n]/g, ' ');
+    // 🚨 v1.1.4-beta.2 (D): HTML 주석은 '내용까지' 마스킹 — <!-- 는 기존 태그
+    // 마스킹 정규식(< + 영문자)에 안 걸려 주석 속 인용문이 대사로 수집되던 구멍.
+    let masked = source.replace(/<!--[\s\S]*?-->/g, blankKeepNewlines);
+    // (C): CoT 컨테이너는 여닫는 태그 사이 내용 전체를 마스킹.
+    // 펜스보다 먼저 실행 — CoT 안에 깨진 펜스 조각이 있어도 바깥을 오염 못 하게.
+    for (const tag of getActiveCotMaskTags()) {
+        masked = masked.replace(
+            new RegExp(`<\\s*${tag}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tag}\\s*>`, 'gi'),
+            blankKeepNewlines
+        );
+    }
+    masked = masked
+        .replace(/```[^\n]*\n[\s\S]*?```/g, blankKeepNewlines)
+        // 🚨 v1.1.4-beta.2 (B): 한 줄 인라인 펜스(```…```)는 위의 짝 마스킹이
+        // 개행(\n)을 요구해 통과되던 구멍 — 별도 마스킹.
+        .replace(/```[^`\n]+```/g, blankKeepNewlines);
+    // 🚨 v1.1.4-beta.2 (A): 짝·인라인 마스킹 후에도 남은 여는 펜스(홀수 개)는
+    // 마크다운 표준처럼 "거기부터 끝까지 코드"로 간주해 마스킹.
+    // 미닫힘 상태창·절단된 출력에서 펜스 안 따옴표("tense" 등)가 대사로 오인되던 구멍.
+    const loneFenceIndex = masked.indexOf('```');
+    if (loneFenceIndex !== -1) {
+        masked = masked.slice(0, loneFenceIndex) + blankKeepNewlines(masked.slice(loneFenceIndex));
+    }
+    masked = masked
         .replace(/<\/?[a-zA-Z][^>]*>/g, match => match.replace(/[^\n]/g, ' '))
         // 🚨 beta.3: 작가 오타(“…")·모델 정규화("…”)로 커리/스트레이트가 섞이면
         // 짝맞추기가 통째로 밀리므로 수집 단계에서 통일 (1:1 치환이라 index 불변)
