@@ -925,20 +925,31 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${activeKey}`;
             }
             
-            const baseTemp = parseFloat(settings.temperature) || 0.3; const temperature = prevTranslation ? Math.min(baseTemp + 0.3, 1.0) : baseTemp; let maxTokens = parseInt(settings.maxTokens) || 8192;
-            // 🚨 직역 병기 ON = 출력이 자연번역+직역 2배 → 토큰 잘림 방지 증량
+            const baseTemp = parseFloat(settings.temperature) || 0.3; const temperature = prevTranslation ? Math.min(baseTemp + 0.3, 1.0) : baseTemp; let maxTokens = parseInt(settings.maxTokens) || 8192;            // 🚨 직역 병기 ON = 출력이 자연번역+직역 2배 → 토큰 잘림 방지 증량
             if (settings.literalBilingual === 'on') maxTokens = Math.min(maxTokens * 2, 32768);
             
             // 🚨 Gemini 3.x thinking 모델 대응: thinkingBudget 최소화
             // 3.5/3.0 Flash, 2.5 Pro는 reasoning 모델 → thinking이 토큰 다 먹어서 빈 응답 가능
             // 번역 작업은 패턴 매칭이라 thinking 거의 무의미 → 최소값(128)로 설정
             // (Pro 모델은 0 불가, 최소 128 필요 / Flash는 0 가능하지만 호환성 위해 128 통일)
-            const generationConfig = { temperature, maxOutputTokens: maxTokens };
+            // 🚨 v1.1.4-beta.4 (H): Gemini 3.x는 temperature/top_p/top_k를 거부하고
+            // thinkingBudget 대신 thinkingLevel(문자열)을 요구함 (구글 공식 마이그레이션).
+            // 기존 코드는 temperature+thinkingBudget을 항상 실어 3.6/3.7 직결 호출이
+            // 400 검증 에러로 전멸 → "API 키 문제"로 오인되던 근본 원인.
+            // 2.x 요청 본문은 기존과 완전히 동일하게 유지 (기존 사용자 무영향).
             const modelLower = (actualModel || '').toLowerCase();
-            const isThinkingModel = /gemini-3|gemini-2\.5-pro/i.test(modelLower);
-            if (isThinkingModel) {
-                generationConfig.thinkingConfig = { thinkingBudget: 128 };
-                console.log(`[CAT] 🤔 thinking 모델 감지 (${actualModel}) → thinkingBudget=128 (번역엔 thinking 불필요)`);
+            const isGemini3Family = /gemini-3/i.test(modelLower);
+            let generationConfig;
+            if (isGemini3Family) {
+                // 3.7은 MINIMAL 미지원 → 최소 사고 수준인 'low' 사용 (번역엔 깊은 사고 불필요)
+                generationConfig = { maxOutputTokens: maxTokens, thinkingConfig: { thinkingLevel: 'low' } };
+                console.log(`[CAT] 🧬 Gemini 3.x 감지 (${actualModel}) → temperature 제외, thinkingLevel=low`);
+            } else {
+                generationConfig = { temperature, maxOutputTokens: maxTokens };
+                if (/gemini-2\.5-pro/i.test(modelLower)) {
+                    generationConfig.thinkingConfig = { thinkingBudget: 128 };
+                    console.log(`[CAT] 🤔 thinking 모델 감지 (${actualModel}) → thinkingBudget=128 (번역엔 thinking 불필요)`);
+                }
             }
             
             const fetchBody = { systemInstruction: { parts: [{ text: activeSystemInstruction }] }, contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig, safetySettings: SAFETY_SETTINGS };
@@ -1347,6 +1358,17 @@ function getActiveCotMaskTags() {
     return _extraCotMaskTags.length ? DEFAULT_COT_MASK_TAGS.concat(_extraCotMaskTags) : DEFAULT_COT_MASK_TAGS;
 }
 
+// 🚨 v1.1.4-beta.4 (G): 서술 속 '인용 강조'(scare quote) 판별 — 병기 필수 대상에서 면제.
+// 예: The "lovers" comment landed... 처럼 서술이 단어를 따옴표로 강조하는 경우.
+// 근거: 진짜 대사는 거의 항상 문장부호를 동반("Wait." "Slowly," "Your parents,")하고,
+// 인용 강조는 문장부호 없는 맨단어("lovers")다. 좋은 모델일수록 이를 '연인'처럼
+// 자연스러운 한국어 인용으로 번역해 겹따옴표 짝이 사라지고, 그 오탐 하나가
+// 완벽한 병기 대사 전체를 폐기시키는 사고가 실측 재현됨(3.7 Flash 제보 로그).
+// 검증기와 자동 조립기의 개수 게이트 양쪽이 동일하게 이 술어를 공유해야 한다.
+function isBareWordScareQuote(content) {
+    return /^[A-Za-z'\u2019-]{1,30}$/.test(String(content || '').trim());
+}
+
 function collectQuotedSegmentsOutsideFences(text) {
     const source = String(text || '');
     // 🚨 beta.7: 마스킹 시 개행은 보존 — 공백으로만 바꾸면 펜스/태그를 관통해
@@ -1425,7 +1447,10 @@ function collectQuotedSegmentsOutsideFences(text) {
 //   G4. 출력이 미번역(영어 그대로)이 아니고, 한글이 존재
 // 개행 안전: 전역 재탐색 없이 수집된 offset 기준으로 뒤에서부터 치환한다.
 function repairBilingualByAlignment(original, output) {
-    const src = collectQuotedSegmentsOutsideFences(original).filter(s => /[A-Za-z]/.test(s.content));
+    // 🚨 v1.1.4-beta.4 (G): 검증기와 동일하게 인용 강조를 개수 게이트에서 면제 —
+    // "lovers" 같은 오탐 1개가 1:1 게이트를 막아 조립 전체를 무산시키던 사고 방지
+    const src = collectQuotedSegmentsOutsideFences(original)
+        .filter(s => /[A-Za-z]/.test(s.content) && !isBareWordScareQuote(s.content));
     const out = collectQuotedSegmentsOutsideFences(output);
     if (src.length === 0) return output;                 // G1
     if (src.length !== out.length) return output;        // G2
@@ -1491,6 +1516,8 @@ function validateKoEnBilingualDialogue(original, output) {
     const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
         .filter(item =>
             /[A-Za-z]/.test(item.content) &&
+            // 🚨 v1.1.4-beta.4 (G): 문장부호 없는 맨단어 인용 강조는 병기 필수에서 면제
+            !isBareWordScareQuote(item.content) &&
             !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content)
         );
     if (sourceDialogues.length === 0) return { ok: true, reason: null };
@@ -2308,7 +2335,16 @@ async function fetchWithRetry(url, body, retries = 5, abortSignal = null, extraH
             }
             
             if (!res.ok) {
-                throw new Error(API_ERROR_MESSAGES[res.status] || `❌ 알 수 없는 오류 (${res.status})`);
+                // 🚨 v1.1.4-beta.4 (I): 구글의 실제 에러 사유를 문구에 덧붙임.
+                // 구글은 잘못된 API 키도 401이 아닌 400으로 주기 때문에, 본문을 버리면
+                // '키 오류'와 '파라미터 오류'가 같은 문구로 뭉개져 오진을 유발했음.
+                let apiDetail = '';
+                try {
+                    const errJson = await res.json();
+                    const apiMsg = errJson?.error?.message;
+                    if (apiMsg) apiDetail = `\n↳ ${String(apiMsg).slice(0, 160)}`;
+                } catch (_) { /* 본문이 JSON이 아니면 기존 문구만 사용 */ }
+                throw new Error((API_ERROR_MESSAGES[res.status] || `❌ 알 수 없는 오류 (${res.status})`) + apiDetail);
             }
             
             return await res.json();

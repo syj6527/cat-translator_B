@@ -144,7 +144,7 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
                 <div class="cat-setting-row">
                     <label>모델</label>
                     <select id="ct-model" class="text_pole">
-                        <optgroup label="🐱 고양이 라인 (Flash)"><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.0-flash">2.0 Flash</option></optgroup>
+                        <optgroup label="🐱 고양이 라인 (Flash)"><option value="gemini-3.7-flash">3.7 Flash</option><option value="gemini-3.5-flash">3.5 Flash</option><option value="gemini-2.5-flash">2.5 Flash (10/16 종료 예정)</option></optgroup>
                         <optgroup label="🐯 호랑이 라인 (Pro)"><option value="gemini-2.5-pro">2.5 Pro</option><option value="gemini-3.1-pro-preview">3.1 Pro Preview</option></optgroup>
                         <option value="custom">✏️ 직접 입력...</option>
                     </select>

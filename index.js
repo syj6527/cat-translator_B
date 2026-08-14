@@ -16,6 +16,14 @@ if (!extension_settings[EXT_NAME] && extension_settings["cat-translator"]) {
     extension_settings[EXT_NAME] = JSON.parse(JSON.stringify(extension_settings["cat-translator"]));
 }
 let settings = Object.assign({}, defaultSettings, extension_settings[EXT_NAME]);
+// 🚨 v1.1.4-beta.5: 구글이 지원 종료한 모델이 저장돼 있으면 자동 이관.
+// gemini-2.0 계열은 2026-06-01 셧다운 완료 — 호출 시 무조건 실패하며,
+// 에러 본문이 안 보이던 구버전에선 "API 키 문제"로 오인되던 원인.
+const RETIRED_DIRECT_MODELS = { 'gemini-2.0-flash': 'gemini-3.5-flash', 'gemini-2.0-flash-001': 'gemini-3.5-flash', 'gemini-2.0-flash-lite': 'gemini-3.5-flash' };
+if (RETIRED_DIRECT_MODELS[settings.directModel]) {
+    console.log(`[CAT] ⚰️ 지원 종료 모델 감지: ${settings.directModel} → ${RETIRED_DIRECT_MODELS[settings.directModel]} 자동 이관`);
+    settings.directModel = RETIRED_DIRECT_MODELS[settings.directModel];
+}
 
 let _chatSaveTimer = null;
 const _translationApplyTokens = new Map();
