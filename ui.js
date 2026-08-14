@@ -1,7 +1,7 @@
 // ============================================================
 // 🐱 Translator v1.1.0 - ui.js
 // ============================================================
-import { CAT_BETA_VERSION, catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection } from './utils.js';
+import { CAT_BETA_VERSION, catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection, resolveInputUserPrompt } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin, deleteHistoryItem } from './cache.js';
 import { fetchTranslation, gatherContextMessages, SYSTEM_SHIELD, STYLE_PRESETS, getLastDebugLog } from './translator.js';
 
@@ -212,6 +212,10 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
                 <textarea id="ct-user-prompt" class="text_pole" rows="3" placeholder="번역 스타일, 상황극 설정 등 자유롭게 입력">${settings.userPrompt || ''}</textarea>
             </div>
             <div class="cat-setting-row">
+                <label>인풋 번역 프롬프트 (입력창 전용)</label>
+                <textarea id="ct-input-user-prompt" class="text_pole" rows="2" placeholder="비워두면 위의 공용 프롬프트를 사용해요. 캐릭터 프리셋의 영향을 받지 않는 전역 설정입니다.">${settings.inputUserPrompt || ''}</textarea>
+            </div>
+            <div class="cat-setting-row">
                 <label>사전 (원문 = 번역어) 
                     <span id="ct-dict-reset" style="float:right; cursor:pointer; font-size:1.4em; transition:0.2s;" title="사전 지우기 (우편함 비우기)">${dictIcon}</span>
                 </label>
@@ -258,7 +262,7 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
     
     // 모든 설정 필드에 자동 저장 연결
     $('#ct-profile, #ct-auto-mode, #ct-bidirectional, #ct-dialogue-bilingual, #ct-literal-bilingual, #ct-lang, #ct-style, #ct-temperature, #ct-max-tokens, #ct-context-range, #ct-retranslate-strength, #ct-after-edit, #ct-preview-cleanup').on('change', autoSave);
-    $('#ct-key, #ct-model-custom, #ct-user-prompt, #ct-dictionary').on('input', autoSave);
+    $('#ct-key, #ct-model-custom, #ct-user-prompt, #ct-input-user-prompt, #ct-dictionary').on('input', autoSave);
     
     $('#ct-model').val(settings.directModel).on('change', function () {
         const val = $(this).val();
@@ -332,6 +336,7 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
     });
     
     $('#ct-user-prompt').on('input', function () { settings.userPrompt = $(this).val(); });
+    $('#ct-input-user-prompt').on('input', function () { settings.inputUserPrompt = $(this).val(); });
     
     // 🚨 번역 프롬프트 프리셋 시스템
     const _rebuildPresetDropdown = () => {
@@ -529,6 +534,12 @@ export function collectSettings() {
     const safePromptValue = (promptTextarea.length > 0 && !promptValue && _settingsRef?.userPrompt) 
         ? _settingsRef.userPrompt 
         : promptValue;
+    // 🚨 v1.1.4-beta.3: 인풋 전용 프롬프트도 동일한 손실 방지 패턴 적용
+    const inputPromptTextarea = $('#ct-input-user-prompt');
+    const inputPromptValue = inputPromptTextarea.length > 0 ? (inputPromptTextarea.val() || '') : (_settingsRef?.inputUserPrompt || '');
+    const safeInputPromptValue = (inputPromptTextarea.length > 0 && !inputPromptValue && _settingsRef?.inputUserPrompt)
+        ? _settingsRef.inputUserPrompt
+        : inputPromptValue;
     
     return {
         profile: $('#ct-profile').val() || _settingsRef?.profile || '', customKey: $('#ct-key').val() || _settingsRef?.customKey || '',
@@ -540,7 +551,7 @@ export function collectSettings() {
         targetLang: $('#ct-lang').val() || _settingsRef?.targetLang || 'Korean', style: $('#ct-style').val() || _settingsRef?.style || 'normal',
         temperature: parseFloat($('#ct-temperature').val()) || _settingsRef?.temperature || 0.3, maxTokens: parseInt($('#ct-max-tokens').val()) || _settingsRef?.maxTokens || 8192,
         contextRange: Math.min(6, Math.max(0, parseInt($('#ct-context-range').val()) || _settingsRef?.contextRange || 1)),
-        userPrompt: safePromptValue, dictionary: safeDictValue,
+        userPrompt: safePromptValue, inputUserPrompt: safeInputPromptValue, dictionary: safeDictValue,
         retranslateStrength: $('#ct-retranslate-strength').val() || _settingsRef?.retranslateStrength || 'normal',
         afterEditMode: $('#ct-after-edit').val() || _settingsRef?.afterEditMode || 'notify',
         previewTranslate: _settingsRef?.previewTranslate || 'off',
@@ -631,7 +642,8 @@ export function injectInputButtons(settings, stContext, processMessageFn) {
                 ` (신뢰도 ${Math.round(inputDirection.analysis.confidence * 100)}%)`
             );
             
-            const inputSettings = { ...settings, dialogueBilingual: 'off', literalBilingual: 'off', targetLang: inputDirection.targetLang };
+            // 🚨 v1.1.4-beta.3: 입력창 번역은 전용 프롬프트 사용 (비어있으면 공용 폴백)
+            const inputSettings = { ...settings, dialogueBilingual: 'off', literalBilingual: 'off', targetLang: inputDirection.targetLang, userPrompt: resolveInputUserPrompt(settings) };
             const requestChatRef = SillyTavern?.getContext?.()?.chat || stContext.chat;
             const result = await fetchTranslation(textToTranslate, inputSettings, stContext, {
                 forceLang: inputDirection.targetLang,

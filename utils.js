@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.4-beta.2';
+export const CAT_BETA_VERSION = '1.1.4-beta.3';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -1276,6 +1276,17 @@ export function getInputTargetLanguage(settings = {}) {
 
     const configuredTarget = settings.targetLang || 'Korean';
     return configuredTarget === 'Korean' ? 'English' : configuredTarget;
+}
+
+// 🚨 v1.1.4-beta.3: 인풋(사용자 입력) 번역 전용 프롬프트 해석 — 단일 출처.
+// 인풋 진입점 3곳(index.js 자동/스마트, ui.js 버튼)이 공용한다.
+// - inputUserPrompt가 비어있으면 기존 공용 userPrompt로 폴백 → 기존 사용자 동작 불변.
+// - inputUserPrompt는 defaultSettings에만 존재하고 프리셋/baseline 수집 코드가
+//   참조하지 않으므로, 캐릭터 프리셋 스왑과 무관한 전역·독립 설정으로 유지된다.
+// - 캐시 키는 최종 settings.userPrompt 해시를 쓰므로 인풋 캐시는 자동 분리된다.
+export function resolveInputUserPrompt(settings = {}) {
+    const inputPrompt = String(settings.inputUserPrompt || '');
+    return inputPrompt.trim() ? inputPrompt : (settings.userPrompt || '');
 }
 
 export function resolveInputTranslationDirection(text, settings = {}) {

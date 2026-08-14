@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0
 // ============================================================
 import { extension_settings, getContext } from '../../../../scripts/extensions.js';
-import { catNotify, getThemeEmoji, getCompletionEmoji, setTextareaValue, getModelTheme, detectLanguageDirection, getCacheModelKey, buildLiteralDetailsHtml, stripLiteralDetails, analyzeLanguage, isClearlyLanguage, resolveInputTranslationDirection } from './utils.js';
+import { catNotify, getThemeEmoji, getCompletionEmoji, setTextareaValue, getModelTheme, detectLanguageDirection, getCacheModelKey, buildLiteralDetailsHtml, stripLiteralDetails, analyzeLanguage, isClearlyLanguage, resolveInputTranslationDirection, resolveInputUserPrompt } from './utils.js';
 import { initCache, deleteCached } from './cache.js';
 import { fetchTranslation, gatherContextMessages } from './translator.js';
 import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation, isTranslatedEditActive, markTranslatedEditSave, clearTranslatedEditSessions } from './ui.js';
@@ -10,7 +10,7 @@ import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageBut
 const EXT_NAME = "cat-translator-beta";
 const stContext = getContext();
 
-const defaultSettings = { profile: '', customKey: '', vertexKey: '', vertexProject: '', vertexRegion: 'global', directModel: 'gemini-2.5-flash', customModelName: '', autoMode: 'none', bidirectional: 'off', dialogueBilingual: 'off', literalBilingual: 'off', iconVisibility: 'all', targetLang: 'Korean', style: 'normal', temperature: 0.3, maxTokens: 8192, contextRange: 1, userPrompt: '', dictionary: '', retranslateStrength: 'normal', afterEditMode: 'notify', previewTranslate: 'off', previewCleanup: 'off', cotMaskTags: '', promptPresets: {}, charPresetMap: {} };
+const defaultSettings = { profile: '', customKey: '', vertexKey: '', vertexProject: '', vertexRegion: 'global', directModel: 'gemini-2.5-flash', customModelName: '', autoMode: 'none', bidirectional: 'off', dialogueBilingual: 'off', literalBilingual: 'off', iconVisibility: 'all', targetLang: 'Korean', style: 'normal', temperature: 0.3, maxTokens: 8192, contextRange: 1, userPrompt: '', dictionary: '', retranslateStrength: 'normal', afterEditMode: 'notify', previewTranslate: 'off', previewCleanup: 'off', cotMaskTags: '', inputUserPrompt: '', promptPresets: {}, charPresetMap: {} };
 // 정식판 설정은 첫 베타 실행 때만 한 방향으로 복사한다. 이후 두 설정은 독립적이다.
 if (!extension_settings[EXT_NAME] && extension_settings["cat-translator"]) {
     extension_settings[EXT_NAME] = JSON.parse(JSON.stringify(extension_settings["cat-translator"]));
@@ -531,7 +531,9 @@ async function doTranslateMessage(msgId, msg, textToTranslate, isInput, prevTran
             ...settings,
             dialogueBilingual: 'off',
             literalBilingual: 'off',
-            targetLang: inputDirection.targetLang
+            targetLang: inputDirection.targetLang,
+            // 🚨 v1.1.4-beta.3: 인풋 번역은 전용 프롬프트 사용 (비어있으면 공용 폴백)
+            userPrompt: resolveInputUserPrompt(settings)
         };
     } else {
         const detected = detectLanguageDirection(textToTranslate, settings);
@@ -774,7 +776,10 @@ async function handleEditAreaTranslation(editArea, msgId, abortSignal, isInput =
         ...settings,
         dialogueBilingual: 'off',
         literalBilingual: 'off',
-        targetLang: direction.targetLang
+        targetLang: direction.targetLang,
+        // 🚨 v1.1.4-beta.3: 이 함수는 인풋/아웃풋 겸용 — 인풋일 때만 전용 프롬프트,
+        // 아웃풋 편집 번역은 기존 공용 userPrompt 그대로 (동작 불변)
+        userPrompt: isInput ? resolveInputUserPrompt(settings) : settings.userPrompt
     };
     const editRequestToken = `edit:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     _translationApplyTokens.set(msgId, editRequestToken);
