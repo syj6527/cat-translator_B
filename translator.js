@@ -1787,8 +1787,28 @@ export function assessTranslationQuality(output, originalText, settings, targetL
         const sourceTerm = (targetLang === 'English' ? right : left).trim();
         const outputTerm = (targetLang === 'English' ? left : right).trim();
         if (!sourceTerm || !outputTerm) continue;
+        // 🚨 v1.1.4-beta.6 (K-2): 부분 문자열 오탐 봉합 — 기존 includes()는
+        // 모델이 "아이린"으로 잘못 써도 그 안에 "이린"이 포함돼 누락 감지를 통과시켰음
+        // → 재시도가 안 걸려 변형 표기가 그대로 출고 ("사전 이름 불안정"의 원인).
+        // 한글 표기는 앞글자가 한글이 아닌 경우만 유효 출현으로 인정:
+        // "이린아"(조사)는 유효 ✓ / "아이린"(접두 변형)은 무효 ✗ — 한국어 이름은
+        // 뒤에 조사가 붙지 앞에 음절이 붙지 않는다는 성질 이용.
+        const outputTermLower = outputTerm.toLocaleLowerCase();
+        const naturalLower = natural.toLocaleLowerCase();
+        let outputTermFound;
+        if (/[가-힣]/.test(outputTerm)) {
+            outputTermFound = false;
+            let idx = naturalLower.indexOf(outputTermLower);
+            while (idx !== -1) {
+                const prevChar = idx > 0 ? naturalLower[idx - 1] : '';
+                if (!/[가-힣]/.test(prevChar)) { outputTermFound = true; break; }
+                idx = naturalLower.indexOf(outputTermLower, idx + 1);
+            }
+        } else {
+            outputTermFound = naturalLower.includes(outputTermLower);
+        }
         if (source.toLocaleLowerCase().includes(sourceTerm.toLocaleLowerCase()) &&
-            !natural.toLocaleLowerCase().includes(outputTerm.toLocaleLowerCase())) {
+            !outputTermFound) {
             missingGlossary.push(outputTerm);
         }
     }
@@ -2143,12 +2163,21 @@ Just plain, fully-translated text.
     
     if (settings.dictionary && settings.dictionary.trim()) {
         // 🚨 본문에 실제 존재하는 사전 항목만 필터링 (AI가 무관한 항목을 오적용하는 것 방지)
+        // 🚨 v1.1.4-beta.6 (K-1): 방향 인지 — 입력 번역(→English)일 땐 우변(한국어)이
+        // 원문에 있는지로 매칭하고, SOURCE=TARGET 의미가 유지되도록 항목을 뒤집어 제시.
+        // 기존엔 항상 좌변만 검사해 입력 번역에서 사전 프롬프트가 누락됐음.
+        const toEnglish = targetLang === 'English';
         const textLower = String(sourceText || text).toLowerCase();
-        const matchedLines = settings.dictionary.split('\n').filter(l => {
-            if (!l.includes('=')) return false;
-            const orig = l.split('=')[0].trim();
-            return orig && textLower.includes(orig.toLowerCase());
-        });
+        const matchedLines = settings.dictionary.split('\n').map(l => {
+            if (!l.includes('=')) return null;
+            const [left, ...rightParts] = l.split('=');
+            const right = rightParts.join('=').trim();
+            const leftTrim = left.trim();
+            if (!leftTrim || !right) return null;
+            const sourceSide = toEnglish ? right : leftTrim;
+            if (!textLower.includes(sourceSide.toLowerCase())) return null;
+            return toEnglish ? `${right}=${leftTrim}` : `${leftTrim}=${right}`;
+        }).filter(Boolean);
         if (matchedLines.length > 0) {
             const targetLangName = targetLang || 'the target language';
             parts.push(`

@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.1.4-beta.5';
+export const CAT_BETA_VERSION = '1.1.4-beta.6';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -554,7 +554,30 @@ export function restoreTranslationStructure(text, protection, options = {}) {
     }
     
     const rawOutput = String(text || '');
-    const output = normalizeProtectedStructureResponse(rawOutput, protection);
+    let output = normalizeProtectedStructureResponse(rawOutput, protection);
+    // 🚨 v1.1.4-beta.6 (J): 인접 이중 마커 삼킴 자동 구제.
+    // 들여쓰기 리스트/상태창을 보호하면 @@CATFMT_0018@@@@CATFMT_0019@@처럼
+    // 마커가 딱 붙은 쌍이 생기는데(들여쓰기 토큰+내용 토큰), LLM이 이런 연속
+    // 토큰을 하나로 병합하는 실수가 실측 재현됨 → 같은 원문이면 결정론적으로
+    // 반복 실패("특정 메시지만 계속 안 됨" 제보의 유력 원인).
+    // 구제 조건(전부 충족 시에만): ① 마커가 출력에 없음 ② 보호 원문에서 그 마커가
+    // 다른 마커와 즉시 인접 ③ 그 파트너가 출력에 정확히 1회 존재.
+    // 재삽입 위치는 원문과 동일한 쪽(파트너의 앞/뒤)이므로 순서가 보존된다.
+    for (const marker of protection.expectedMarkers) {
+        if (output.includes(marker)) continue;
+        const before = protection.text.match(new RegExp(`(@@CATFMT_\\d{4}@@)${marker}`));
+        const after = protection.text.match(new RegExp(`${marker}(@@CATFMT_\\d{4}@@)`));
+        const partnerBefore = before ? before[1] : null;   // 원문에서 marker 바로 앞에 붙은 마커
+        const partnerAfter = after ? after[1] : null;      // 원문에서 marker 바로 뒤에 붙은 마커
+        const countIn = (hay, needle) => hay.split(needle).length - 1;
+        if (partnerBefore && countIn(output, partnerBefore) === 1) {
+            output = output.replace(partnerBefore, partnerBefore + marker);
+            console.log(`[CAT] 🔧 인접 마커 삼킴 구제: ${marker} (${partnerBefore} 뒤에 재삽입)`);
+        } else if (partnerAfter && countIn(output, partnerAfter) === 1) {
+            output = output.replace(partnerAfter, marker + partnerAfter);
+            console.log(`[CAT] 🔧 인접 마커 삼킴 구제: ${marker} (${partnerAfter} 앞에 재삽입)`);
+        }
+    }
     const allowBilingualMacroCopies = options.allowBilingualMacroCopies === true;
     const validationOutput = allowBilingualMacroCopies
         ? normalizeBilingualMacroCopiesForValidation(output)
