@@ -460,8 +460,30 @@ export function buildTranslationCacheScope(stContext, contextMessages = []) {
 
 // 🚨 v1.2.0 (관측 카운터): "잘 됐는지"를 알람·제보가 아니라 숫자로 확인하기 위한
 // 세션 누계. 유령 복사 헤더에 요약 한 줄로 노출된다. 새로고침 시 초기화(세션 단위).
-const _catStats = { started: 0, success: 0, partialBilingual: 0, softDegrade: 0, hardFail: 0, aborted: 0 };
+const _catStats = {
+    started: 0,
+    success: 0,
+    partialBilingual: 0,
+    bilingualBelowTarget: 0,
+    hardFail: 0,
+    aborted: 0
+};
 export function getTranslationStats() { return { ..._catStats }; }
+
+// 병기 완성률은 결과를 막는 게이트가 아니라 세션 통계용 분류다.
+// 90% 이상은 경미한 흠집으로 보고 정상, 70~89%는 부분 병기,
+// 70% 미만은 병기 기준 미달로 기록한다. 어떤 구간도 출력 자체를 폐기하지 않는다.
+export function classifyBilingualCompletion(repaired, total) {
+    const safeTotal = Math.max(0, Number(total) || 0);
+    const safeRepaired = Math.min(safeTotal, Math.max(0, Number(repaired) || 0));
+    const ratio = safeTotal === 0 ? 1 : safeRepaired / safeTotal;
+    const outcome = ratio >= 0.9
+        ? 'success'
+        : ratio >= 0.7
+            ? 'partialBilingual'
+            : 'bilingualBelowTarget';
+    return { outcome, ratio, repaired: safeRepaired, total: safeTotal };
+}
 
 export async function fetchTranslation(text, settings, stContext, options = {}) {
     _catStats.started++;
@@ -634,8 +656,13 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         hasContext: contextMessages.length > 0
     });
 
-    const acceptTranslation = async (acceptedOutput, acceptedThought = null) => {
-        _catStats.success++;
+    const acceptTranslation = async (acceptedOutput, acceptedThought = null, outcome = 'success') => {
+        // 한 번의 번역은 정상·부분병기·병기미달 중 정확히 하나에만 집계한다.
+        // 부분병기를 success에도 더하던 이전 이중 집계는 금지한다.
+        const terminalCounter = outcome === 'partialBilingual' || outcome === 'bilingualBelowTarget'
+            ? outcome
+            : 'success';
+        _catStats[terminalCounter]++;
         // 🚨 beta.9.1(로그): 성공 확정 시 이전 시도의 에러 스탬프 제거 — '중단됨'인데 성공 표시되던 혼동 해소
         _lastDebugLog.error = null;
         const accepted = splitLiteralAppendix(acceptedOutput);
@@ -738,27 +765,48 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             _lastDebugLog.quality = _softCandidate.quality;
             return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought);
         }
-        // 🚨 beta.5: 병기 구조 붕괴로만 최종 실패한 경우 → 번역을 버리지 않고
-        // 괄호를 벗겨 순수 한국어로 강등해서 표시한다 (우아한 강등).
-        // "번역이 아예 안 됨"이 사용자에게 가장 나쁜 결말이라는 원칙.
-        if (salvageText && /한영 병기 구조 붕괴/.test(String(reason))) {
-            // 🚨 v1.2.0 (작업3-a): 부분 성공 보존 — 정상 병기는 살리고 실패분만 한국어.
-            // 알람 없음(결과 있음 원칙), softNote·카운터로만 관측.
-            const partial = assessBilingualPartialKeep(sourceText, salvageText);
-            if (partial.keep) {
-                console.warn(`[CAT] 🧩 병기 부분 성공 보존: 대사 ${partial.total}개 중 ${partial.missing}개 영어 미보존`);
-                recordSoftNote(`병기 일부 누락 (${partial.missing}/${partial.total}) — 부분 성공 보존`);
-                _catStats.partialBilingual++;
-                _lastDebugLog.cleaned = salvageText;
-                return acceptTranslation(salvageText, null);
+        // 병기 구조가 끝내 완벽하지 않아도 요청 모드를 버리지 않는다.
+        // 실패 사유가 병기 검사 자체가 아니더라도 병기 요청이었다면 복원 가능한
+        // 대사를 조립한 뒤 결과를 출고한다. 완성률은 통계만 나누며 출력 게이트로
+        // 사용하지 않는다. 따라서 20% 병기도 '정상 성공'으로 세탁하지 않지만,
+        // 구조 붕괴 알림과 함께 번역 전체가 사라지는 일도 없다.
+        const isKoEnBilingualRequest =
+            (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean';
+        if (salvageText && isKoEnBilingualRequest) {
+            const partialRepair = repairBilingualPartially(sourceText, salvageText);
+            const partialText = makeDisplaySafeSalvage(partialRepair.text || salvageText, reason);
+            if (partialText && partialText.trim() && /[가-힣]/.test(partialText)) {
+                const completion = classifyBilingualCompletion(
+                    partialRepair.repaired,
+                    partialRepair.total
+                );
+                const completionPercent = Math.round(completion.ratio * 100);
+                console.warn(
+                    `[CAT] 🧩 병기 최우선 출고: ${completion.repaired}/${completion.total}개 ` +
+                    `앱 조립 (${completionPercent}%, ${completion.outcome})`
+                );
+                const recoveryLabel = completion.outcome === 'success'
+                    ? '병기 경미 손상 허용 — 정상 성공 처리'
+                    : completion.outcome === 'partialBilingual'
+                        ? '부분 병기 — 결과 우선 표시'
+                        : '병기 기준 미달 — 결과 우선 표시';
+                recordSoftNote(
+                    `${recoveryLabel} (${completion.repaired}/${completion.total}, ${completionPercent}%)`
+                );
+                _lastDebugLog.cleaned = partialText;
+                return acceptTranslation(partialText, null, completion.outcome);
             }
-            const degraded = degradeBilingualToKorean(salvageText);
-            if (degraded && degraded.trim() && /[가-힣]/.test(degraded)) {
-                console.warn('[CAT] 🩹 병기 형식 복구 실패 → 한국어만 남겨 표시');
-                recordSoftNote('병기 형식 실패 → 한국어 전용으로 강등 표시');
-                _catStats.softDegrade++;
-                _lastDebugLog.cleaned = degraded;
-                return acceptTranslation(degraded, null);
+        }
+        // 검증은 교정 재시도를 위한 신호이지 최종 출력 금지 판결이 아니다.
+        // 두 번 모두 일부 구조가 어긋났더라도 번역 본문이 존재하면 안전 표시본으로
+        // 정리해 출고한다. 사용자가 원문만 보게 되는 결말은 빈 응답일 때만 허용한다.
+        if (salvageText && salvageText.trim() && /[가-힣]/.test(salvageText)) {
+            const safeSalvage = makeDisplaySafeSalvage(salvageText, reason);
+            if (safeSalvage.trim()) {
+                console.warn(`[CAT] 🛟 검증 일부 실패 허용 → 번역 우선 표시: ${reason}`);
+                recordSoftNote(`검증 일부 실패 허용 — 번역 우선 표시 (${reason})`);
+                _lastDebugLog.cleaned = safeSalvage;
+                return acceptTranslation(safeSalvage, null);
             }
         }
         _catStats.hardFail++;
@@ -1042,27 +1090,54 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         
         if (settings.literalBilingual === 'on') {
             if (!initialLiteralSplit.literal) {
-                return await retryRejectedTranslation('직역 병기 마커 또는 직역 본문 누락');
+                return await retryRejectedTranslation(
+                    '직역 병기 마커 또는 직역 본문 누락',
+                    null,
+                    null,
+                    initialLiteralSplit.natural || cleaned
+                );
             }
             
             const naturalRestored = restoreTranslationStructure(initialLiteralSplit.natural, structureProtection, structureValidationOptions);
             if (!naturalRestored.ok) {
-                return await retryRejectedTranslation(naturalRestored.reason, null, naturalRestored.detail);
+                const looseNatural = restoreTranslationTokens(initialLiteralSplit.natural, structureProtection);
+                return await retryRejectedTranslation(
+                    naturalRestored.reason,
+                    null,
+                    naturalRestored.detail,
+                    looseNatural.ok ? looseNatural.text : initialLiteralSplit.natural
+                );
             }
             recordBoundaryRecovery(naturalRestored.boundaryRecovery);
             recordSoftNote(naturalRestored.softNote);
             const literalRestored = restoreTranslationTokens(initialLiteralSplit.literal, structureProtection);
             if (!literalRestored.ok) {
-                return await retryRejectedTranslation(literalRestored.reason, null, literalRestored.detail);
+                return await retryRejectedTranslation(
+                    literalRestored.reason,
+                    null,
+                    literalRestored.detail,
+                    naturalRestored.text
+                );
             }
             cleaned = `${naturalRestored.text}\n<<<CAT_LITERAL>>>\n${literalRestored.text}`;
         } else {
             if (initialLiteralSplit.literal && !/CAT_LITERAL/i.test(text)) {
-                return await retryRejectedTranslation('일반 번역에 직역 병기 파트가 섞임');
+                return await retryRejectedTranslation(
+                    '일반 번역에 직역 병기 파트가 섞임',
+                    null,
+                    null,
+                    initialLiteralSplit.natural
+                );
             }
             const restored = restoreTranslationStructure(cleaned, structureProtection, structureValidationOptions);
             if (!restored.ok) {
-                return await retryRejectedTranslation(restored.reason, null, restored.detail);
+                const looseRestore = restoreTranslationTokens(cleaned, structureProtection);
+                return await retryRejectedTranslation(
+                    restored.reason,
+                    null,
+                    restored.detail,
+                    looseRestore.ok ? looseRestore.text : null
+                );
             }
             recordBoundaryRecovery(restored.boundaryRecovery);
             recordSoftNote(restored.softNote);
@@ -1090,7 +1165,12 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         if (_structureFallback) {
             const fallbackStructure = validateTranslationStructure(text, naturalCleaned, structureValidationOptions);
             if (!fallbackStructure.ok) {
-                return await retryRejectedTranslation(fallbackStructure.reason, null, fallbackStructure.detail);
+                return await retryRejectedTranslation(
+                    fallbackStructure.reason,
+                    null,
+                    fallbackStructure.detail,
+                    naturalCleaned
+                );
             }
             recordBoundaryRecovery(fallbackStructure.boundaryRecovery);
             recordSoftNote(fallbackStructure.softNote);
@@ -1107,7 +1187,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         
         // 🚨 beta.6: 병기 모드 한정 — 검증 전에 자동 조립을 시도한다.
         // 모델이 영어를 빠뜨린 대사를 원문에서 복원해 STRICT_OK로 통과시키고,
-        // 조립 불가(개수 불일치 등)면 원본 그대로라 기존 강등 경로로 폴백된다.
+        // 조립 불가(개수 불일치 등)면 최종 fail-open 부분 조립 경로로 넘어간다.
         // 직역 병기 섹션(<<<CAT_LITERAL>>>)은 분리해서 natural에만 조립을 적용
         // — 직역 섹션의 따옴표가 카운트/정렬에 섞여 들어가는 오염을 차단.
         if ((settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean') {
@@ -1556,9 +1636,65 @@ function normalizeMalformedBilingualQuoteLayout(original, output) {
     ));
 }
 
+// 인용구 개수가 어긋나도 순서대로 복원 가능한 슬롯은 최대한 병기로 살린다.
+// 최종 실패 시 한국어 전용으로 강등하지 않기 위한 fail-open 조립기다.
+export function repairBilingualPartially(original, output) {
+    const src = collectQuotedSegmentsOutsideFences(original)
+        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
+    if (src.length === 0) return { text: output, repaired: 0, total: 0, missing: 0 };
+
+    const normalizedOutput = normalizeMalformedBilingualQuoteLayout(original, output);
+    const out = collectQuotedSegmentsOutsideFences(normalizedOutput);
+    if (out.length === 0) {
+        return { text: normalizedOutput, repaired: 0, total: src.length, missing: src.length };
+    }
+
+    const delims = {
+        double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
+    };
+    const repairs = [];
+    let sourceIndex = 0;
+    for (const candidate of out) {
+        if (sourceIndex >= src.length) break;
+        if (/\n/.test(candidate.content) || candidate.content.length > 1200) continue;
+
+        const sourceDialogue = src[sourceIndex];
+        let korean = extractKoreanDialogue(sourceDialogue.content, candidate.content);
+        if (!korean && /[가-힣]/.test(candidate.content)) {
+            const bracketKorean = candidate.content.match(/\[([^\]\n]*[가-힣][^\]\n]*)\]/)?.[1];
+            korean = bracketKorean || candidate.content;
+        }
+        if (!korean) continue;
+
+        const [opener, closer] = delims[candidate.type] || ['"', '"'];
+        repairs.push({
+            index: candidate.index,
+            len: candidate.content.length + opener.length + closer.length,
+            replacement: `${opener}${sourceDialogue.content} [${korean.trim()}]${closer}`
+        });
+        sourceIndex++;
+    }
+
+    let result = normalizedOutput;
+    repairs.sort((a, b) => b.index - a.index);
+    for (const repair of repairs) {
+        result = result.slice(0, repair.index) + repair.replacement +
+            result.slice(repair.index + repair.len);
+    }
+    if (repairs.length > 0) {
+        console.log(`[CAT] 🧩 부분 병기 앱 조립: ${repairs.length}/${src.length}개`);
+    }
+    return {
+        text: result,
+        repaired: repairs.length,
+        total: src.length,
+        missing: Math.max(0, src.length - repairs.length)
+    };
+}
+
 // 한영 병기의 최종 문자열은 LLM이 아니라 애플리케이션이 조립한다.
 // LLM 출력에서는 한국어 대사만 추출하고 영어 슬롯은 원문에서 그대로 복사한다.
-// 대사 수/순서가 1:1일 때만 조립하며, 병합·누락은 검증/강등 경로로 넘긴다.
+// 1:1이면 엄격 조립하고, 개수 불일치는 부분 조립으로 결과를 최대한 보존한다.
 export function repairBilingualByAlignment(original, output) {
     const src = collectQuotedSegmentsOutsideFences(original)
         .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
@@ -1566,7 +1702,7 @@ export function repairBilingualByAlignment(original, output) {
 
     const normalizedOutput = normalizeMalformedBilingualQuoteLayout(original, output);
     const out = collectQuotedSegmentsOutsideFences(normalizedOutput);
-    if (src.length !== out.length) return output;
+    if (src.length !== out.length) return repairBilingualPartially(original, normalizedOutput).text;
 
     const delims = {
         double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
@@ -1577,7 +1713,7 @@ export function repairBilingualByAlignment(original, output) {
         const candidate = out[i];
         if (sourceDialogue.type !== candidate.type || /\n/.test(candidate.content) ||
             sourceDialogue.content.length > 500 || candidate.content.length > 700) {
-            return output;
+            return repairBilingualPartially(original, normalizedOutput).text;
         }
 
         const strict = candidate.content.match(/^([\s\S]*?)\s+\[([^\]\n]*)\]\s*$/);
@@ -1589,7 +1725,7 @@ export function repairBilingualByAlignment(original, output) {
         if (strictTranslationValid) continue;
 
         const korean = extractKoreanDialogue(sourceDialogue.content, candidate.content);
-        if (!korean) return output;
+        if (!korean) return repairBilingualPartially(original, normalizedOutput).text;
         const [opener, closer] = delims[candidate.type] || ['"', '"'];
         repairs.push({
             index: candidate.index,
@@ -1680,7 +1816,22 @@ export function validateKoEnBilingualDialogue(original, output) {
     return { ok: true, reason: null };
 }
 
-// 🚨 beta.5: 병기 구조가 최종 실패했을 때의 우아한 강등(graceful degradation).
+export function makeDisplaySafeSalvage(text, reason = '') {
+    let safe = String(text || '')
+        .replace(/@@[A-Za-z0-9_]+_\d{4}@@/g, '')
+        .trim();
+    // 태그 구조가 끝내 맞지 않으면 서식만 포기하고 읽을 수 있는 본문은 살린다.
+    if (/태그|구조 토큰|구조 개수 불일치/.test(String(reason))) {
+        safe = safe.replace(/<\/?[a-zA-Z][^>]*>/g, '');
+    }
+    // 홀수 펜스는 이후 메시지까지 코드블럭으로 삼킬 수 있으므로 표시 기호만 제거한다.
+    const fences = safe.match(/```/g) || [];
+    if (fences.length % 2 !== 0) safe = safe.replace(/```[^\n]*/g, '');
+    return safe.trim();
+}
+
+// 과거 한국어 전용 강등 구현. 신규 fail-open 경로에서는 호출하지 않으며,
+// 구버전 결과 호환 분석을 위해 함수만 보존한다.
 // "English [한국어]" → "한국어" 로 괄호를 벗겨 순수 한국어 번역만 남긴다.
 // 병기는 잃지만 번역 자체는 살아남음 — "번역 안 됨"보다 백배 나은 결말.
 // 한 인용구에 괄호가 여러 개면(끊긴 병기) 한국어들을 이어붙인다.
@@ -1871,26 +2022,27 @@ export function validateTranslationPayload(output, originalText, settings, targe
     };
 }
 
-// 🚨 v1.2.0 (작업3-a): 병기 최종 실패 시 '부분 성공 보존' 판정.
-// 원칙: 정상 병기는 살리고 실패 인용구만 한국어로 통과. 단, 인용구 통삭제
-// (출력 인용 수 < 원문 대사 수) 의심이면 보존하지 않고 기존 경로(강등/실패)로.
+// 병기 최종 실패 시 '부분 성공 보존' 판정.
+// 정상 병기는 하나라도 살리고 실패 인용구는 번역 결과 그대로 통과시킨다.
 export function assessBilingualPartialKeep(original, output) {
     const src = collectQuotedSegmentsOutsideFences(original).filter(item =>
         /[A-Za-z]/.test(item.content) &&
         !isBareWordScareQuote(item.content) &&
         !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content));
     if (src.length === 0) return { keep: false };
-    // 인용구 '개수' 가드는 쓰지 않는다 — 긴 인용이 작은따옴표('…')로 바뀌면
-    // 수집기에 안 잡혀 개수가 줄어드는 게 바로 보존해야 할 표적 케이스이기 때문.
-    // 대신 '미보존 과반' 가드: 절반을 넘게 잃었으면 부분이 아니라 붕괴 → 강등 폴백.
+    // 인용구 개수나 보존 비율로 전체 결과를 폐기하지 않는다. 1/N만 병기여도
+    // 한국어 전용 강등보다는 사용자가 요청한 모드를 더 많이 보존한다.
     // 존재 검사용 canon: L 사면과 동일하게 이음 부호 표류(,↔.)는 관용 — !? 는 유지
     const canon = v => String(v || '').replace(/[\u2019\u2018]/g, "'").replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
     const hay = canon(output);
     let missing = 0;
     for (const d of src) if (!hay.includes(canon(d.content))) missing++;
     if (missing === 0) return { keep: false };
-    if (missing * 2 > src.length) return { keep: false, total: src.length, missing };
-    return { keep: true, total: src.length, missing };
+    return {
+        keep: /[가-힣]/.test(String(output || '')),
+        total: src.length,
+        missing
+    };
 }
 
 function assessTranslationQuality(output, originalText, settings, targetLang) {

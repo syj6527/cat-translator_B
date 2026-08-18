@@ -977,7 +977,7 @@ function showDebugPopup() {
             ? log.attempts.map((a, i) => `${i + 1}차 [${a.time}] (${a.path}) ${a.reason}${a.detail ? '\n    ' + String(a.detail).replace(/\n/g, '\n    ') : ''}`).join('\n')
             : null;
         const _st = getTranslationStats();
-        const _stLine = `세션 통계: 번역 ${_st.started} · 성공 ${_st.success} (부분병기 ${_st.partialBilingual} · 강등 ${_st.softDegrade}) · 실패 ${_st.hardFail} · 중단 ${_st.aborted}`;
+        const _stLine = `세션 통계: 번역 ${_st.started} · 정상 ${_st.success} · 부분병기 ${_st.partialBilingual} · 병기미달 ${_st.bilingualBelowTarget} · 실패 ${_st.hardFail} · 중단 ${_st.aborted}`;
         const copyText = `[🐱🔬 Cat Translator Lab 디버그 로그]\n버전: ${CAT_BETA_VERSION}\n${_stLine}\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}${log?.validationDetail ? '\n\n--- 검증 상세 ---\n' + log.validationDetail : ''}${attemptLines ? '\n\n--- 시도 이력 ---\n' + attemptLines : ''}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
         catCopyToClipboard(copyText).then(ok => ok
             ? catNotify('📋 디버그 로그 복사 완료!', 'success')
