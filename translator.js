@@ -571,7 +571,10 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     }
 
     // 구조 토큰을 지키지 못하는 모델은 검증 실패 후 구버전 호환 경로로 한 번 재시도한다.
-    const sourceText = text.trim();
+    // 대사 범위 인덱스와 보호 대상 문자열이 반드시 같은 줄바꿈 기준을 사용해야 한다.
+    // Windows/Android 입력의 CRLF를 보호기에서만 LF로 줄이면, 줄마다 1글자씩 누적
+    // 오프셋이 틀어져 대사 앵커가 서술문 한가운데 박히는 실측 사고가 발생한다.
+    const sourceText = text.trim().replace(/\r\n/g, '\n');
     // 🚨 v1.1.4-beta.2 (C): 설정의 사용자 추가 CoT 태그 목록을 수집기에 동기화
     syncCotMaskTags(settings.cotMaskTags);
     const dialogueBilingualOn = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
@@ -580,7 +583,12 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             .filter(item => /[A-Za-z]|\{\{[\s\S]*?\}\}/.test(item.content))
             .filter(item => !isBareWordScareQuote(item.content))
             .filter(item => !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content))
-            .map(item => ({ index: item.index, contentLength: item.content.length, type: item.type }))
+            .map(item => ({
+                index: item.index,
+                contentLength: item.content.length,
+                content: item.content,
+                type: item.type
+            }))
         : [];
     const structureProtection = _structureFallback
         ? {

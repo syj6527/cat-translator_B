@@ -79,7 +79,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.2.0-lab.4';
+export const CAT_BETA_VERSION = '1.2.0-lab.5';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -274,7 +274,18 @@ export function protectTranslationStructure(text, options = {}) {
         for (const range of dialogueRanges) {
             const contentStart = range.index + 1;
             const contentEnd = contentStart + range.contentLength;
-            if (range.index < cursor || contentStart > source.length || contentEnd >= source.length) continue;
+            const open = source[range.index];
+            const close = source[contentEnd];
+            const validQuotePair = (open === '"' && close === '"') ||
+                (open === '“' && close === '”') ||
+                (open === '「' && close === '」') ||
+                (open === '『' && close === '』');
+            // 범위는 보호기에 들어온 바로 그 문자열을 가리켜야 한다. 줄바꿈 정규화나
+            // 전처리 불일치가 다시 생겨도 엉뚱한 서술 중간에는 절대 앵커를 넣지 않는다.
+            if (range.index < cursor || contentStart > source.length ||
+                contentEnd >= source.length || !validQuotePair) {
+                continue;
+            }
             anchored += source.slice(cursor, contentStart);
             anchored += addToken('', 'dialogue-open');
             anchored += source.slice(contentStart, contentEnd);
@@ -784,6 +795,19 @@ export function restoreTranslationStructure(text, protection, options = {}) {
     }
     
     let restored = output;
+    // 한국어에서는 {{obj}}/{{poss}}/{{subj}}가 조사와 함께 쓰이지 않으면 생략 가능하다.
+    // 모델이 이를 이미 완결된 서술어 뒤·문장부호 앞에 고립시키면(…했다{{poss}}.)
+    // 보존할 문법 기능이 없으므로 복원 전에 해당 소프트 슬롯만 제거한다.
+    for (const token of protection.tokens) {
+        if (!canOmitProtectedToken(token, options)) continue;
+        const escaped = escapeRegExp(token.marker);
+        const stranded = new RegExp(`${escaped}(?=\\s*(?:[.!?…,;:)}\\]"'»]|$))`, 'g');
+        const cleaned = restored.replace(stranded, '');
+        if (cleaned !== restored) {
+            console.log(`[CAT] 🪶 문장 끝 고립 문법 매크로 제거: ${token.value}`);
+            restored = cleaned;
+        }
+    }
     for (const token of protection.tokens) {
         // 🚨 v1.2.0: 전체 치환 — 매크로 복제 허용에 따라 모든 등장을 복원
         restored = restored.split(token.marker).join(token.value);
