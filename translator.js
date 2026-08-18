@@ -372,7 +372,8 @@ export function buildSystemInstruction(settings, options = {}) {
 
     if (targetLang === 'Korean') {
         activeRules.push(
-            'KOREAN LOCK: narration uses one consistent declarative -다 style unless an active style preset explicitly overrides it. Each character uses one stable 반말/존댓말 level inferred from context.'
+            'KOREAN LOCK: narration uses one consistent declarative -다 style unless an active style preset explicitly overrides it. Each character uses one stable 반말/존댓말 level inferred from context.',
+            'LOCALIZATION RESTRAINT: match the source register exactly. NEVER upgrade neutral source wording into Korean slang, memes, or internet abbreviations (e.g., "seat warmers" → "열선 시트/좌석 열선", never "엉따"). Use slang or abbreviations ONLY when the source itself is slang.'
         );
         activeRules.push(
             'Choose Korean kinship terms only when age, gender, and relationship support them; otherwise use a name or neutral term. Never map foreign accents to Korean regional dialects.'
@@ -458,6 +459,15 @@ export function buildTranslationCacheScope(stContext, contextMessages = []) {
 }
 
 export async function fetchTranslation(text, settings, stContext, options = {}) {
+    // 🚨 v1.1.7 (M-2b): 문맥 화자 이름 목록 — 문미 호격 '관측' 스탬프용.
+    // speaker가 "Baron, Archie, Lars"처럼 묶여 오는 경우 쉼표로 분해한다.
+    const _contextSpeakerNames = Array.from(new Set(
+        (options.contextMessages || [])
+            .map(m => (m && m.speaker) ? String(m.speaker) : '')
+            .flatMap(s => s.split(','))
+            .map(s => s.trim())
+            .filter(s => s.length >= 2)
+    ));
     const isVertexModel = settings.directModel && settings.directModel.startsWith('vertex-');
     const apiKey = settings.customKey || secret_state[SECRET_KEYS.MAKERSUITE];
     const vertexKey = settings.vertexKey || '';
@@ -529,7 +539,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             const cachedCombined = cachedLiteral
                 ? `${cachedNatural}\n<<<CAT_LITERAL>>>\n${cachedLiteral}`
                 : cachedNatural;
-            const cachedValidation = validateTranslationPayload(cachedCombined, text, settings, targetLang);
+            const cachedValidation = validateTranslationPayload(cachedCombined, text, settings, targetLang, { contextSpeakers: _contextSpeakerNames });
             const cachedQuality = assessTranslationQuality(cachedCombined, text, settings, targetLang);
             const literalMissing = settings.literalBilingual === 'on' && !cachedLiteral;
             const cachedQualityInvalid = cachedQuality.score < 75 ||
@@ -1077,7 +1087,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
         }
 
-        const validation = validateTranslationPayload(cleaned, text, settings, targetLang);
+        const validation = validateTranslationPayload(cleaned, text, settings, targetLang, { contextSpeakers: _contextSpeakerNames });
         if (!validation.ok) {
             return await retryRejectedTranslation(validation.reason, null, validation.detail, cleaned);
         }
@@ -1551,8 +1561,31 @@ function validateKoEnBilingualDialogue(original, output) {
                 }
                 continue;
             }
-            if (canonizeForCompare(bilingual[1]) !== canonizeForCompare(sourceDialogue.content)) continue;
-            matched = true;
+            if (canonizeForCompare(bilingual[1]) !== canonizeForCompare(sourceDialogue.content)) {
+                // 🚨 v1.1.5 (L): 인접 대사 병합 허용 — "대사," 서술 "대사." 구조에서
+                // 모델이 한국어 어순상 대사를 하나의 인용구로 합치는 것은 더 자연스러운
+                // 번역이며(1.1.4 제보 로그 실측: "Prank," + "Sure, baby." → 한 인용구),
+                // 이를 붕괴로 오판해 완벽한 병기 전체를 폐기하던 사고 방지.
+                // 판정: 후보 영어부 = 원문 '연속' 대사 i..j를 '순서 그대로' 전부 결합.
+                // 이음새 문장부호 표류(,↔.)만 허용하는 전용 비교(flex)를 쓰며,
+                // 통삭제·순서 뒤집기·내용 창작은 결합 일치가 깨져 여전히 실패한다.
+                const flexForMerge = (value) => canonizeForCompare(value).replace(/[.,]/g, '');
+                const candidateFlex = flexForMerge(bilingual[1]);
+                if (candidateFlex.startsWith(flexForMerge(sourceDialogue.content))) {
+                    let accumulated = sourceDialogue.content;
+                    let mergeEnd = i;
+                    let mergeValid = true;
+                    while (candidateFlex !== flexForMerge(accumulated)) {
+                        mergeEnd++;
+                        if (mergeEnd >= sourceDialogues.length ||
+                            sourceDialogues[mergeEnd].type !== sourceDialogue.type) { mergeValid = false; break; }
+                        accumulated = accumulated + ' ' + sourceDialogues[mergeEnd].content;
+                        if (!candidateFlex.startsWith(flexForMerge(accumulated))) { mergeValid = false; break; }
+                    }
+                    if (mergeValid && candidateFlex === flexForMerge(accumulated)) {
+                        console.log(`[CAT] 🔗 인접 대사 병합 인정: 원문 대사 ${i + 1}~${mergeEnd + 1} → 출력 인용구 1개`);
+                        i = mergeEnd;
+                        matched = true;
             outputIndex++;
             break;
         }
@@ -1624,7 +1657,7 @@ function transformOutsideFencedBlocks(text, transform) {
     return result;
 }
 
-export function validateTranslationPayload(output, originalText, settings, targetLang) {
+export function validateTranslationPayload(output, originalText, settings, targetLang, options = {}) {
     if (!output || !output.trim()) {
         return { ok: false, reason: '번역 결과가 비어 있음' };
     }
@@ -1632,11 +1665,42 @@ export function validateTranslationPayload(output, originalText, settings, targe
     const split = splitLiteralAppendix(output);
     const natural = split.natural || '';
     const original = String(originalText || '');
+
+    // 🚨 v1.1.7 (M-2b): '문미 호격 추가' 감지를 차단에서 **경고**로 강등.
+    // v1.1.6의 차단 방식은 정당한 번역까지 죽이는 오탐이 실측됨 — 인풋 번역은
+    // 한글 원문("아치")→영문 출력("Archie")으로 이름 표기가 바뀌는 게 정상이라,
+    // "원문에 이름이 있는지"를 표기 그대로 비교하는 방식으론 판정이 원리적으로
+    // 불가능하다 (v1.1.6 제보 로그: "…아치 너보다…" → "…than you, Archie." 차단).
+    // 강등 후: 번역은 정상 출고하고, 디버그 로그·콘솔에만 의심 스탬프를 남겨
+    // 진짜 이름 추가(펠소 계열)가 재발하는지 데이터로 관측한다.
+    // 실제 차단 방어는 프롬프트 계약(M-1)이 담당한다.
+    let vocativeSoftNote = null;
+    if (targetLang === 'English' && Array.isArray(options.contextSpeakers) && options.contextSpeakers.length > 0) {
+        const originalLower = original.toLowerCase();
+        for (const rawName of options.contextSpeakers) {
+            const name = String(rawName || '').trim();
+            if (name.length < 2) continue;
+            if (originalLower.includes(name.toLowerCase())) continue;
+            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const vocativeTail = new RegExp(`,\\s*${escaped}\\s*[.!?…"'\\u201d]*\\s*$`, 'im');
+            if (vocativeTail.test(natural)) {
+                vocativeSoftNote = `⚠️ 문미 호격 의심 (관측용, 차단 아님): "${name}" — 원문 한글 표기와 대조 필요`;
+                console.warn(`[CAT] ${vocativeSoftNote}`);
+                break;
+            }
+        }
+    }
     
-    const sourceHasEvaluationText = /\b(?:Correct|Incorrect)\b|(?:->|→)|^(?:Source|Original|Input|Output|Translation|Analysis|Reasoning|Avoid|Required)\s*:/mi.test(original);
+    // 🚨 v1.1.9 (O): 게이트 대칭화 — 카운터가 세는 4단어(Avoid·Required 포함)를
+    // 게이트도 전부 인정. 기존엔 Correct|Incorrect만 게이트에 있어서, 병기 모드가
+    // 보존한 평범한 영어 대사("avoid the docks", "required past nine")가
+    // '모델 검증 과정 노출'로 오판돼 전체 원문 유지되는 사고가 실측 재현됨.
+    const sourceHasEvaluationText = /\b(?:Correct|Incorrect|Avoid|Required)\b|(?:->|→)|^(?:Source|Original|Input|Output|Translation|Analysis|Reasoning|Avoid|Required)\s*:/mi.test(original);
     if (!sourceHasEvaluationText) {
         const arrowCount = (natural.match(/(?:->|→)/g) || []).length;
-        const gradingCount = (natural.match(/\b(?:Correct|Incorrect|Avoid|Required)(?:\s+(?:output|payload|structure|format))?[.:]?/gi) || []).length;
+        // 🚨 v1.1.9 (O): 닫는 경계(\b) 추가 — correcting/avoiding/correctly 같은
+        // 접미 파생어가 채점어로 카운트되던 구멍 봉합.
+        const gradingCount = (natural.match(/\b(?:Correct|Incorrect|Avoid|Required)\b(?:\s+(?:output|payload|structure|format))?[.:]?/gi) || []).length;
         const labelCount = (natural.match(/^(?:Source|Original|Input|Output|Translation|Correct|Analysis|Reasoning|Avoid|Required)\s*:/gmi) || []).length;
         if ((arrowCount >= 2 && gradingCount >= 1) || gradingCount >= 2 || labelCount >= 2) {
             return { ok: false, reason: '모델의 검증 과정이 번역문에 노출됨' };
@@ -1648,7 +1712,12 @@ export function validateTranslationPayload(output, originalText, settings, targe
         return { ok: false, reason: '프롬프트 지시문이 번역문에 노출됨' };
     }
     
-    if (settings.literalBilingual !== 'on' && (split.literal || /^»\s+/m.test(natural))) {
+    // 🚨 v1.1.10 (P): » 검사에 원문 게이트 추가 — 원문이 길메 인용(» ...)을
+    // 정당하게 쓰는 카드에서, 번역이 이를 보존하면 매번 '직역 형식 섞임'으로
+    // 하드 거부되던 O형 비대칭 봉합. 내부 마커(<<<CAT_LITERAL>>>)는 원문에
+    // 존재할 수 없으므로 기존대로 무게이트 유지.
+    if (settings.literalBilingual !== 'on' &&
+        (split.literal || (!/^»\s+/m.test(original) && /^»\s+/m.test(natural)))) {
         return { ok: false, reason: '일반 번역에 직역 형식이 섞임' };
     }
     
@@ -1703,7 +1772,7 @@ export function validateTranslationPayload(output, originalText, settings, targe
         };
     }
     
-    return { ok: true, reason: null, softNote: dividerSoftNote };
+    return { ok: true, reason: null, softNote: [dividerSoftNote, vocativeSoftNote].filter(Boolean).join(' / ') || null };
 }
 
 export function assessTranslationQuality(output, originalText, settings, targetLang) {
@@ -2227,6 +2296,38 @@ ${voiceReferences.join('\n')}`);
     }
     
     if (contextMessages.length > 0) {
+        const speechPatterns = analyzeSpeechPatterns(contextMessages);
+        if (speechPatterns) {
+            parts.push(`\n[Speech Patterns from Context - Reference for character voice. Apply only to dialogue, NOT narration]\n${speechPatterns}\n[NOTE: For narration/description outside dialogue, use the style preset above. Do NOT force these patterns onto narration.]`);
+        }
+        
+        const voiceReferences = contextMessages
+            .filter(msg => typeof msg === 'object' && msg.voiceText)
+            .map(msg => `[${msg.speaker}] ${clipPromptText(msg.voiceText, 320)}`);
+        if (voiceReferences.length > 0) {
+            parts.push(`\n[Korean Voice Reference - REGISTER & NAMES]
+Use these prior Korean lines to preserve each speaker's 반말/존댓말, vocabulary register, and rhythm.
+ALSO follow their spelling of proper nouns, character names, and forms of address (호칭) — if a prior line writes a name or title a certain way, keep that exact form. This includes user-corrected lines.
+Do NOT use them as factual context and do NOT copy their sentences or phrasing.
+${voiceReferences.join('\n')}`);
+        }
+    }
+    
+    // 🚨 캐릭터 카드 힌트 주입 (RP 배경/성격 컨텍스트)
+    if (characterHints) {
+        parts.push(`\n[Character Background - Use as reference for tone/setting consistency. Do NOT translate this:]\n${characterHints}`);
+    }
+    
+    if (contextMessages.length > 0) {
+        // 🚨 v1.1.6 (M-1): 인풋(→English) 번역 전용 계약 — 문맥 유출 차단.
+        // 문맥에 페르소나 이름이 반복되면 모델이 호칭을 추가하거나 입력을 문맥에
+        // 맞춰 의역하는 문제가 제보됨. 문맥 섹션 바로 앞에 배치해 직접 통제한다.
+        if (isToEnglish) {
+            parts.push(`\n[INPUT TRANSLATION CONTRACT]
+This is the user's OWN line to send. Translate ONLY the given text, word-for-word faithful.
+NEVER add names, addressees, vocatives, or any word not present in the source.
+NEVER rephrase the input to "fit" the story context. Context below is for register and pronoun reference ONLY.`);
+        }
         parts.push('\n[Context - Previous messages for reference. Match each character\'s speech style consistently. Do NOT translate these:]');
         contextMessages.forEach((msg, i) => {
             const offset = contextMessages.length - i;

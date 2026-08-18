@@ -351,19 +351,32 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
     };
     const stopGlow = () => mesBlock.find('.cat-mes-trans-btn .cat-emoji-icon').removeClass('cat-glow-anim').removeAttr('data-cat-glow-start');
 
-    const isAutoMode = (settings.autoMode !== 'none');
-    const isAutoTriggered = isAutoMode && !abortSignal;
+    // 🚨 v1.1.8 (N): 중복 실행 게이트를 DOM 글로우가 아닌 '실제 진행 레지스트리'로 판정.
+    // 기존엔 글로우 애니메이션 존재 여부가 게이트였는데, 180초 글로우 타임아웃이
+    // UI만 끄고 실제 번역은 계속 돌아서 — 토큰 150개급 초대형 메시지가 180초를
+    // 정상 초과하면 게이트가 열리고, 다음 트리거가 거의 다 된 번역을 중단시키는
+    // "중단됨 무한 루프"가 실측 제보됨. 이제:
+    //  · 진행 중 + 자동/조용/벌크 재트리거 → 죽이지 않고 조용히 스킵
+    //  · 진행 중 + 수동 탭 → 기존 설계대로 중단 후 재시작 (사용자에게 고지)
+    //  · 글로우 타임아웃은 순수 UI 청소로 강등 (게이트 역할 제거)
+    const inflightCtrl = _activeTranslationAborts.get(msgId);
+    const hasInflight = !!(inflightCtrl && !inflightCtrl.signal.aborted);
+    if (hasInflight && (isAutoEvent || silent || abortSignal)) {
+        console.log(`[CAT] ⏳ 진행 중 번역 유지 — 자동/조용/벌크 재트리거 스킵 #${msgId}`);
+        return;
+    }
+    if (hasInflight && !silent) {
+        catNotify(`${getThemeEmoji()} 이전 번역을 중단하고 새로 시작해요. 긴 메시지는 수 분 걸릴 수 있어요.`, "info");
+    }
 
-    // 🚨 글로우 stuck 자동 감지 및 복구: 60초 이상 stuck이면 강제 해제 후 진행
+    // 🚨 글로우 stuck 자동 감지 및 복구 (v1.1.8부터 순수 UI 청소 — 게이트 아님)
     const stuckGlow = mesBlock.find('.cat-mes-trans-btn .cat-emoji-icon.cat-glow-anim');
     if (stuckGlow.length > 0) {
         const startTime = parseInt(stuckGlow.attr('data-cat-glow-start') || '0');
         const elapsed = Date.now() - startTime;
         if (startTime > 0 && elapsed > 180000) {
-            console.warn(`[CAT] 🔧 글로우 stuck 감지 (${Math.round(elapsed/1000)}s) → 강제 해제 후 재시도 #${msgId}`);
+            console.warn(`[CAT] 🔧 글로우 stuck 감지 (${Math.round(elapsed/1000)}s) → 강제 해제 #${msgId}`);
             stopGlow();
-        } else {
-            return;
         }
     }
     startGlow();
@@ -371,7 +384,7 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
     const glowTimeout = setTimeout(() => { stopGlow(); console.warn(`[CAT] ⚠️ 글로우 타임아웃 #${msgId}`); }, 180000); // 🚨 beta.3: 장문+재시도는 60초를 정상 초과 → 조기 소등이 유저 재탭·중복 실행 유발
     let historyShown = false;
     // 🚨 beta.9: 외부 signal(벌크 등) 없으면 자체 중단 컨트롤러 생성 — 수동/자동 모두 버튼 탭으로 중단 가능
-    // (isAutoTriggered 판정·조기 return 이후 시점에 등록해 레지스트리 누수 방지)
+    // (진행 레지스트리 게이트 통과 이후 시점에 등록해 레지스트리 누수 방지)
     let _ownAbortCtrl = null;
     if (!abortSignal) {
         // 🚨 beta.3: 같은 메시지에 진행 중인 번역이 있으면 먼저 중단 — 글로우 소등 후
@@ -434,7 +447,7 @@ async function processMessage(id, isInput = false, abortSignal = null, silent = 
         };
 
         if (!silent && !isRetranslation) {
-            const prefix = isAutoTriggered ? '자동 번역' : '번역';
+            const prefix = isAutoEvent ? '자동 번역' : '번역';
             catNotify(`${getThemeEmoji()} ${prefix} 진행 중...`, "success");
         }
 
@@ -1082,6 +1095,10 @@ jQuery(async () => {
         
         // 영어가 실제로 수정되었는지 확인
         if (newOriginal === msg.extra.original_mes) return;
+        // 🚨 v1.1.11 (Q): 진행 중 번역 양보 — 폴러(3초 백업)가 이후 재시도하므로
+        // 여기서 소비하지 않고 물러난다 (진행 중 번역 중단 방지).
+        const inflightEdit = _activeTranslationAborts.get(parseInt(id, 10));
+        if (inflightEdit && !inflightEdit.signal.aborted) return;
         
         console.log(`[CAT] ✏️ 원문 갱신 #${id}: "${msg.extra.original_mes.substring(0,30)}..." → "${newOriginal.substring(0,30)}..."`);
         
@@ -1105,7 +1122,7 @@ jQuery(async () => {
             deleteCached(msg.mes, targetLang, modelKey);
             setTimeout(() => {
                 if (getLiveChat() !== expectedChatRef) return;
-                processMessage(id, false, null, false, false);
+                processMessage(id, false, null, false, true);
             }, 300);
         }
     }
@@ -1306,6 +1323,12 @@ jQuery(async () => {
             // 이미 처리한 메시지는 스킵
             const fingerprint = msg.mes.substring(0, 100);
             if (_editPollProcessed.get(idx) === fingerprint) return;
+            // 🚨 v1.1.11 (Q): 진행 중 번역이 있으면 이번 사이클은 양보 — 지문/원문을
+            // 소비하지 않고 물러나 3초 뒤 재시도. 기존엔 isAutoEvent=false로
+            // processMessage를 불러 N 게이트에 '수동'으로 위장 진입했고, 초대형
+            // 메시지의 진행 중 번역을 중단시키는 루프가 v1.1.10에서도 남아 있었음.
+            const inflightPoll = _activeTranslationAborts.get(idx);
+            if (inflightPoll && !inflightPoll.signal.aborted) return;
             _editPollProcessed.set(idx, fingerprint);
             
             console.log(`[CAT] 🔍 폴링 감지: 원문 수정 #${idx} (mode: ${mode})`);
@@ -1329,7 +1352,7 @@ jQuery(async () => {
                 deleteCached(msg.mes, targetLang, modelKey);
                 setTimeout(() => {
                     if (getLiveChat() !== pollChatRef) return;
-                    processMessage(idx, false, null, false, false);
+                    processMessage(idx, false, null, false, true);
                 }, 300);
             } else if (mode === 'notify') {
                 stContext.updateMessageBlock(idx, msg);
