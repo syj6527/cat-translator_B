@@ -22,6 +22,20 @@ export function isDividerElement(value) {
     return dividerLineRegex().test(String(value ?? ''));
 }
 
+// ST 저장/스와이프 동기화가 바꾸는 표현 차이는 사용자 편집으로 보지 않는다.
+// 의미 있는 본문 수정은 그대로 구분하되 CRLF↔LF, NFC, 줄끝 공백만 정규화한다.
+export function normalizeSourceForEditCompare(text) {
+    return String(text ?? '')
+        .replace(/\r\n?/g, '\n')
+        .normalize('NFC')
+        .replace(/[\t ]+$/gm, '')
+        .trim();
+}
+
+export function isSameSourceForEdit(a, b) {
+    return normalizeSourceForEditCompare(a) === normalizeSourceForEditCompare(b);
+}
+
 export function getThemeEmoji() {
     const theme = document.body.getAttribute('data-cat-theme');
     return theme === 'tiger' ? '🐯' : '🐱';
@@ -79,7 +93,7 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.2.0-lab.5';
+export const CAT_BETA_VERSION = '1.2.0-lab.6';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";

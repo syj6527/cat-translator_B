@@ -1,8 +1,8 @@
 {
     "name": "cat-translator-lab",
     "display_name": "🐱🔬 Cat Translator Lab",
-    "version": "1.2.0-lab.5",
-    "description": "🔬 비공개 실험 채널 — CRLF 안전 대사 경계 조립",
+    "version": "1.2.0-lab.6",
+    "description": "🔬 비공개 실험 채널 — 보수적 검증·편집 감지",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
     "css": "style.css"
