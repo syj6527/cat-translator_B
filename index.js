@@ -7,14 +7,10 @@ import { initCache, deleteCached } from './cache.js';
 import { fetchTranslation, gatherContextMessages } from './translator.js';
 import { setupSettingsPanel, collectSettings, updateCacheStats, injectMessageButtons, injectInputButtons, setupDragDictionary, setupMutationObserver, showHistoryPopup, applyTheme, setSuppressAutoSave, clearPendingAutoSave, abortBulkTranslation, isTranslatedEditActive, markTranslatedEditSave, clearTranslatedEditSessions } from './ui.js';
 
-const EXT_NAME = "cat-translator-beta";
+const EXT_NAME = "cat-translator-lab";
 const stContext = getContext();
 
 const defaultSettings = { profile: '', customKey: '', vertexKey: '', vertexProject: '', vertexRegion: 'global', directModel: 'gemini-2.5-flash', customModelName: '', autoMode: 'none', bidirectional: 'off', dialogueBilingual: 'off', literalBilingual: 'off', iconVisibility: 'all', targetLang: 'Korean', style: 'normal', temperature: 0.3, maxTokens: 8192, contextRange: 1, userPrompt: '', dictionary: '', retranslateStrength: 'normal', afterEditMode: 'notify', previewTranslate: 'off', previewCleanup: 'off', cotMaskTags: '', inputUserPrompt: '', promptPresets: {}, charPresetMap: {} };
-// 정식판 설정은 첫 베타 실행 때만 한 방향으로 복사한다. 이후 두 설정은 독립적이다.
-if (!extension_settings[EXT_NAME] && extension_settings["cat-translator"]) {
-    extension_settings[EXT_NAME] = JSON.parse(JSON.stringify(extension_settings["cat-translator"]));
-}
 let settings = Object.assign({}, defaultSettings, extension_settings[EXT_NAME]);
 // 🚨 v1.1.4-beta.5: 구글이 지원 종료한 모델이 저장돼 있으면 자동 이관.
 // gemini-2.0 계열은 2026-06-01 셧다운 완료 — 호출 시 무조건 실패하며,
@@ -915,54 +911,11 @@ function revertMessage(id) {
 }
 function detectDir(text) { return detectLanguageDirection(text, settings); }
 
-async function findEnabledStableTranslator() {
-    try {
-        const extensionsModule = await import('../../../../scripts/extensions.js');
-        const extensionNames = Array.isArray(extensionsModule.extensionNames)
-            ? extensionsModule.extensionNames
-            : [];
-        const disabledExtensions = new Set(extension_settings.disabledExtensions || []);
-
-        for (const name of extensionNames) {
-            let manifest = typeof extensionsModule.getExtensionManifest === 'function'
-                ? extensionsModule.getExtensionManifest(name)
-                : null;
-            if (!manifest) {
-                try {
-                    const response = await fetch(`/scripts/extensions/${name}/manifest.json`, { cache: 'no-store' });
-                    if (response.ok) manifest = await response.json();
-                } catch (e) { /* 구버전 ST fallback 실패는 무시 */ }
-            }
-            if (manifest?.name !== 'cat-translator') continue;
-
-            const found = typeof extensionsModule.findExtension === 'function'
-                ? extensionsModule.findExtension(name)
-                : null;
-            const enabled = found ? found.enabled : !disabledExtensions.has(name);
-            if (enabled) {
-                return {
-                    name,
-                    displayName: manifest.display_name || name
-                };
-            }
-        }
-    } catch (e) {
-        console.warn('[CAT] 정식판 활성 상태 확인 실패:', e);
-    }
-
-    return $('#cat-trans-container').length > 0
-        ? { name: 'runtime', displayName: '기존 Translator' }
-        : null;
-}
-
 jQuery(async () => {
-    const stableTranslator = await findEnabledStableTranslator();
-    if (stableTranslator) {
-        console.error(`[CAT] ${stableTranslator.displayName} 활성 감지 → 베타 로드 중단`);
-        catNotify('🙀 정식판과 베타가 모두 켜져 있어 베타를 중단했어요. 둘 중 하나만 활성화해주세요.', 'warning');
-        return;
-    }
-
+    // 🚨 v1.1.4 핫픽스: 베타에서 물려받은 공존 가드 제거.
+    // 가드는 "정식판(cat-translator)이 켜져 있으면 양보"하는 베타 전용 장치인데,
+    // 정식판 자신의 manifest.name이 cat-translator라서 자기 자신을 감지해
+    // 로드를 중단하는 자기참조 버그가 발생했음. 양보 책임은 베타 쪽 가드가 담당한다.
     try { await initCache(); console.log('[CAT] 🐱 IndexedDB 캐시 초기화 완료'); } catch (e) { console.warn('[CAT] IndexedDB 초기화 실패, 메모리 캐시로 대체:', e); }
     setupSettingsPanel(settings, stContext, saveSettings); setupDragDictionary(settings, saveSettings); setupMutationObserver(processMessage, revertMessage, settings, stContext);
     // 🚨 첫 마이그레이션 / baseline 리셋 안내

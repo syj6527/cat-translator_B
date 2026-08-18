@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
-import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, auditDividerLines, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, analyzeLanguage, isClearlyLanguage } from './utils.js';
+import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, auditDividerLines, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, isKoreanGrammarMacro, analyzeLanguage, isClearlyLanguage } from './utils.js';
 import { deleteCached, getCached, setCached } from './cache.js';
 
 const LEGACY_SYSTEM_SHIELD = `[ABSOLUTE DIRECTIVE - VIOLATION = FAILURE]
@@ -350,11 +350,11 @@ export function buildSystemInstruction(settings, options = {}) {
     if (dialogueMode === 'off') {
         activeRules.push('Dialogue bilingual mode is OFF. Do not retain source-language dialogue or add translation brackets.');
     } else {
-        activeRules.push('Dialogue bilingual mode is ON. Format: "English dialogue. [한국어 번역.]" — the [bracket] goes INSIDE the same quotation marks, immediately after the English.');
-        activeRules.push('Narration (everything outside quotes) is Korean ONLY. Never keep English narration, and never output narration twice (English then Korean = FAILURE).');
-        activeRules.push('WRONG: "I am not a heater, [나 온풍기 아니야,]" Peter muttered, picking up the fork. 그는 포크를 들며 중얼거렸다. ← narration duplicated');
-        activeRules.push('WRONG: "I am not a heater" "[나 온풍기 아니야]" ← bracket outside the quotes');
-        activeRules.push('CORRECT: "I am not a heater. [나 온풍기 아니야.]" 그가 포크를 들며 중얼거렸다.');
+        activeRules.push('Dialogue bilingual assembly is handled by the application AFTER generation.');
+        activeRules.push('Translate narration and every dialogue to Korean. Inside quotation marks output KOREAN ONLY: do not retain English and do not add [translation] brackets.');
+        activeRules.push('Preserve every quotation pair as one separate slot in the same order. Never merge adjacent dialogue slots across speech tags or narration, and never split one slot into several quotes.');
+        activeRules.push('Protected dialogue-open/dialogue-close tokens are hard boundaries. Keep each pair exactly once around only its own translated dialogue.');
+        activeRules.push('REQUIRED MODEL PAYLOAD: He looked back. "Wait. Don\'t go." → 그는 뒤를 돌아봤다. "기다려. 가지 마."');
     }
     
     if (literalMode) {
@@ -458,7 +458,13 @@ export function buildTranslationCacheScope(stContext, contextMessages = []) {
     return `ctx-v1:${hashScopeValue(`${characterIdentity}\u001d${contextPayload}`)}`;
 }
 
+// 🚨 v1.2.0 (관측 카운터): "잘 됐는지"를 알람·제보가 아니라 숫자로 확인하기 위한
+// 세션 누계. 유령 복사 헤더에 요약 한 줄로 노출된다. 새로고침 시 초기화(세션 단위).
+const _catStats = { started: 0, success: 0, partialBilingual: 0, softDegrade: 0, hardFail: 0, aborted: 0 };
+export function getTranslationStats() { return { ..._catStats }; }
+
 export async function fetchTranslation(text, settings, stContext, options = {}) {
+    _catStats.started++;
     // 🚨 v1.1.7 (M-2b): 문맥 화자 이름 목록 — 문미 호격 '관측' 스탬프용.
     // speaker가 "Baron, Archie, Lars"처럼 묶여 오는 경우 쉼표로 분해한다.
     const _contextSpeakerNames = Array.from(new Set(
@@ -501,6 +507,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     const structureValidationOptions = {
         allowBilingualMacroCopies:
             (settings.dialogueBilingual || 'off') === 'ko-en' && targetLang === 'Korean',
+        // 한국어는 목적격·소유격·주격 대명사를 문맥상 자연스럽게 생략한다.
+        // {{obj}}/{{poss}}/{{subj}}만 소프트 슬롯으로 허용하고 엔티티·태그·펜스는 유지한다.
+        allowKoreanGrammarMacroOmission: targetLang === 'Korean',
         // 🚨 beta.5: 절단 소스에서만 구분선 '증가'를 하드 실패로 유지 (창작 카나리아)
         sourceTruncated: detectTruncatedSource(text)
     };
@@ -565,6 +574,14 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     const sourceText = text.trim();
     // 🚨 v1.1.4-beta.2 (C): 설정의 사용자 추가 CoT 태그 목록을 수집기에 동기화
     syncCotMaskTags(settings.cotMaskTags);
+    const dialogueBilingualOn = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
+    const dialogueRanges = dialogueBilingualOn && !isToEnglish
+        ? collectQuotedSegmentsOutsideFences(sourceText)
+            .filter(item => /[A-Za-z]|\{\{[\s\S]*?\}\}/.test(item.content))
+            .filter(item => !isBareWordScareQuote(item.content))
+            .filter(item => !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content))
+            .map(item => ({ index: item.index, contentLength: item.content.length, type: item.type }))
+        : [];
     const structureProtection = _structureFallback
         ? {
             text: sourceText,
@@ -574,11 +591,10 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             expectedMarkers: [],
             hasStructure: false
         }
-        : protectTranslationStructure(sourceText);
+        : protectTranslationStructure(sourceText, { dialogueRanges });
     // 🚨 beta.8: 대사 병기 모드에선 사전 선치환 스킵
     // 선치환은 원문 자체를 바꾸므로, 병기의 "원문 유지" 라인에 한글 이름이 박혀
     // 영어 라인·한국어 파트 양쪽에 한글이 이중 노출됨 → 병기 시 사전은 프롬프트 지시로만 전달
-    const dialogueBilingualOn = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
     const skipPreReplace = dialogueBilingualOn && !isToEnglish;
     const { swapped: preSwapped, matchCount: dictMatchCount } = skipPreReplace
         ? { swapped: structureProtection.text, matchCount: 0 }
@@ -611,6 +627,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     });
 
     const acceptTranslation = async (acceptedOutput, acceptedThought = null) => {
+        _catStats.success++;
         // 🚨 beta.9.1(로그): 성공 확정 시 이전 시도의 에러 스탬프 제거 — '중단됨'인데 성공 표시되던 혼동 해소
         _lastDebugLog.error = null;
         const accepted = splitLiteralAppendix(acceptedOutput);
@@ -717,17 +734,26 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         // 괄호를 벗겨 순수 한국어로 강등해서 표시한다 (우아한 강등).
         // "번역이 아예 안 됨"이 사용자에게 가장 나쁜 결말이라는 원칙.
         if (salvageText && /한영 병기 구조 붕괴/.test(String(reason))) {
+            // 🚨 v1.2.0 (작업3-a): 부분 성공 보존 — 정상 병기는 살리고 실패분만 한국어.
+            // 알람 없음(결과 있음 원칙), softNote·카운터로만 관측.
+            const partial = assessBilingualPartialKeep(sourceText, salvageText);
+            if (partial.keep) {
+                console.warn(`[CAT] 🧩 병기 부분 성공 보존: 대사 ${partial.total}개 중 ${partial.missing}개 영어 미보존`);
+                recordSoftNote(`병기 일부 누락 (${partial.missing}/${partial.total}) — 부분 성공 보존`);
+                _catStats.partialBilingual++;
+                _lastDebugLog.cleaned = salvageText;
+                return acceptTranslation(salvageText, null);
+            }
             const degraded = degradeBilingualToKorean(salvageText);
             if (degraded && degraded.trim() && /[가-힣]/.test(degraded)) {
                 console.warn('[CAT] 🩹 병기 형식 복구 실패 → 한국어만 남겨 표시');
                 recordSoftNote('병기 형식 실패 → 한국어 전용으로 강등 표시');
-                if (!silent) {
-                    catNotify(`${getThemeEmoji()} 병기 형식이 맞지 않아 이번 메시지는 한국어만 표시해요.`, 'warning');
-                }
+                _catStats.softDegrade++;
                 _lastDebugLog.cleaned = degraded;
                 return acceptTranslation(degraded, null);
             }
         }
+        _catStats.hardFail++;
         if (!silent) {
             const shortReason = String(reason || '알 수 없는 형식 오류')
                 .replace(/\s+/g, ' ')
@@ -775,7 +801,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             
             for (let attempt = 0; attempt < MAX_PROFILE_RETRIES; attempt++) {
                 // 🚨 beta.9: 중단 요청 시 프로필 모드는 재시도 진입 전 즉시 종료
-                if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 시도 전)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; return null; }
+                if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 시도 전)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; _catStats.aborted++; return null; }
                 try {
                     // 🚨 재시도 시 토큰 증량 (thinking 모델이 토큰 부족으로 빈 응답 주는 케이스 대응)
                     // attempt 0: 기본값, attempt 1: 2배, attempt 2: 4배 (최대 32768)
@@ -786,7 +812,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                     
                     const response = await stContext.ConnectionManagerRequestService.sendRequest(settings.profile, [{ role: "user", content: fullPrompt }], attemptMaxTokens);
                     // 🚨 beta.9: 프로필 요청은 도중 취소가 불가 → 도착한 결과를 폐기하는 방식으로 중단 처리
-                    if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; return null; }
+                    if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; _catStats.aborted++; return null; }
                     
                     // 🚨 응답 필드 다양화 시도 (ST가 reasoning_content / content / text 등 다양한 형식 반환 가능)
                     if (typeof response === 'string') {
@@ -1446,83 +1472,136 @@ function collectQuotedSegmentsOutsideFences(text) {
     return segments.sort((a, b) => a.index - b.index);
 }
 
-// 🚨 beta.6: 한영 병기 자동 조립 (Auto-Repair by Alignment)
-// 모델이 영어 원문을 빼먹고 한국어로만 번역한 대사를, 코드가 보유한 원문 영어와
-// 짝지어 "영어 [한국어]" 형태로 결정론적 복원한다. 영어를 추측하지 않고 원문에서
-// 그대로 가져오므로 안전하다. 단, 아래 게이트를 모두 통과할 때만 조립하고,
-// 하나라도 어긋나면 원본을 그대로 반환해 기존 강등 경로로 폴백한다.
-//   G1. 원문 영어 대사 존재
-//   G2. 원문 대사 수 == 출력 인용구 수 (1:1 정렬 보장, 누락/분할이면 폴백)
-//   G3. 같은 순번의 구분자(따옴표 종류) 호환
-//   G4. 출력이 미번역(영어 그대로)이 아니고, 한글이 존재
-// 개행 안전: 전역 재탐색 없이 수집된 offset 기준으로 뒤에서부터 치환한다.
-function repairBilingualByAlignment(original, output) {
-    // 🚨 v1.1.4-beta.4 (G): 검증기와 동일하게 인용 강조를 개수 게이트에서 면제 —
-    // "lovers" 같은 오탐 1개가 1:1 게이트를 막아 조립 전체를 무산시키던 사고 방지
-    const src = collectQuotedSegmentsOutsideFences(original)
-        .filter(s => /[A-Za-z]/.test(s.content) && !isBareWordScareQuote(s.content));
-    const out = collectQuotedSegmentsOutsideFences(output);
-    if (src.length === 0) return output;                 // G1
-    if (src.length !== out.length) return output;        // G2
+function canonizeDialogueForCompare(value) {
+    return String(value || '')
+        .replace(/[’‘]/g, "'")
+        .replace(/…/g, '...')
+        .replace(/[—–]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
-    const canon = v => String(v || '')
-        .replace(/[’‘]/g, "'").replace(/…/g, '...').replace(/[—–]/g, '-')
-        .replace(/\s+/g, ' ').trim();
+// "{{User}}…"처럼 매크로와 문장부호만 있고 번역 가능한 어휘가 없는 대사.
+// 이런 대사는 병기 괄호에 한글이 없다는 이유로 실패시키면 안 된다.
+function isPlaceholderOnlyDialogue(content) {
+    const readable = String(content || '')
+        .replace(/\{\{[\s\S]*?\}\}|@@[A-Za-z0-9_]+_\d{4}@@/g, '')
+        .replace(/[\s*_~`'".,!?…:;()[\]{}<>\/\\|+\-=—–]+/g, '');
+    return readable.length === 0;
+}
+
+function extractKoreanDialogue(sourceContent, candidateContent) {
+    const sourceCanon = canonizeDialogueForCompare(sourceContent);
+    const candidate = String(candidateContent || '').trim();
+    const bracketed = candidate.match(/^([\s\S]*?)\s*\[([^\]\n]*)\]\s*$/);
+
+    if (bracketed) {
+        const outer = bracketed[1].trim();
+        const inner = bracketed[2].trim();
+        if (isPlaceholderOnlyDialogue(sourceContent)) {
+            if (canonizeDialogueForCompare(outer) === sourceCanon &&
+                (!inner || canonizeDialogueForCompare(inner) === sourceCanon)) {
+                return inner || sourceContent;
+            }
+        }
+        // 정상 방향: "원문 영어 [한국어]"
+        if (canonizeDialogueForCompare(outer) === sourceCanon && /[가-힣]/.test(inner)) return inner;
+        // 역전 방향: "한국어 [원문 영어]"
+        if (canonizeDialogueForCompare(inner) === sourceCanon && /[가-힣]/.test(outer)) return outer;
+        // 영어 슬롯이 문장부호만 표류한 경우에도 한국어 슬롯은 결정론적으로 살린다.
+        if (/[가-힣]/.test(inner)) return inner;
+        if (/[가-힣]/.test(outer)) return outer;
+        return null;
+    }
+
+    if (isPlaceholderOnlyDialogue(sourceContent) &&
+        canonizeDialogueForCompare(candidate) === sourceCanon) {
+        return sourceContent;
+    }
+    return /[가-힣]/.test(candidate) ? candidate : null;
+}
+
+// 모델이 괄호를 닫는따옴표 밖으로 밀거나 언어 방향을 뒤집은 케이스를 먼저
+// 한 인용구로 접는다. 비한국어 쪽이 실제 원문 대사와 일치할 때만 적용하므로
+// 일반적인 [stage direction]을 병기로 오인하지 않는다.
+function normalizeMalformedBilingualQuoteLayout(original, output) {
+    const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
+        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
+    const byCanon = new Map(sourceDialogues.map(item => [canonizeDialogueForCompare(item.content), item.content]));
+    if (byCanon.size === 0) return output;
+
+    return transformOutsideFencedBlocks(output, segment => segment.replace(
+        /"([^"\n]*)"\s*(?:"\s*)?\[([^\]\n]*)\]\s*"?/g,
+        (match, outerRaw, innerRaw) => {
+            const outer = outerRaw.trim();
+            const inner = innerRaw.trim();
+            const outerSource = byCanon.get(canonizeDialogueForCompare(outer));
+            const innerSource = byCanon.get(canonizeDialogueForCompare(inner));
+            if (outerSource && /[가-힣]/.test(inner)) return `"${outerSource} [${inner}]"`;
+            if (innerSource && /[가-힣]/.test(outer)) return `"${innerSource} [${outer}]"`;
+            if (outerSource && isPlaceholderOnlyDialogue(outerSource) &&
+                canonizeDialogueForCompare(inner) === canonizeDialogueForCompare(outerSource)) {
+                return `"${outerSource} [${outerSource}]"`;
+            }
+            return match;
+        }
+    ));
+}
+
+// 한영 병기의 최종 문자열은 LLM이 아니라 애플리케이션이 조립한다.
+// LLM 출력에서는 한국어 대사만 추출하고 영어 슬롯은 원문에서 그대로 복사한다.
+// 대사 수/순서가 1:1일 때만 조립하며, 병합·누락은 검증/강등 경로로 넘긴다.
+export function repairBilingualByAlignment(original, output) {
+    const src = collectQuotedSegmentsOutsideFences(original)
+        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
+    if (src.length === 0) return output;
+
+    const normalizedOutput = normalizeMalformedBilingualQuoteLayout(original, output);
+    const out = collectQuotedSegmentsOutsideFences(normalizedOutput);
+    if (src.length !== out.length) return output;
+
     const delims = {
         double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
     };
     const repairs = [];
-
     for (let i = 0; i < src.length; i++) {
-        const s = src[i], o = out[i];
-        if (s.type !== o.type) return output;            // G3: 구분자 불일치 → 폴백
-        // G5: 세그먼트가 개행을 포함하면(따옴표 불균형으로 문단을 걸친 가짜 세그먼트)
-        //     전체 폴백 — 오늘 확정된 문단 삼킴 계열 사고를 구조적으로 차단.
-        if (/\n/.test(s.content) || /\n/.test(o.content)) return output;
-        if (s.content.length > 500 || o.content.length > 500) return output;
-        // 이미 병기 형태(… [한국어])인 경우 — 괄호 앞 공백 유무 무관하게 인정
-        const already = o.content.match(/^([\s\S]*?)\s*\[([^\]]*[가-힣][^\]]*)\]\s*$/);
-        if (already) {
-            const wellSpaced = /\s\[/.test(o.content);
-            if (canon(already[1]) === canon(s.content) && wellSpaced) continue; // STRICT_OK
-            // 🚨 beta.7: 영어 슬롯이 원문과 다름(모델이 쉼표→마침표 등 문장부호를
-            // 바꾼 표류). 복원을 포기하면 검증기가 exact 불일치로 폐기하므로,
-            // 영어 슬롯만 원문으로 교체해 결정론적으로 맞춘다.
-            const [op2, cl2] = delims[o.type] || ['"', '"'];
-            repairs.push({
-                index: o.index,
-                len: o.content.length + op2.length + cl2.length,
-                replacement: `${op2}${s.content} [${already[2].trim()}]${cl2}`
-            });
-            continue;
+        const sourceDialogue = src[i];
+        const candidate = out[i];
+        if (sourceDialogue.type !== candidate.type || /\n/.test(candidate.content) ||
+            sourceDialogue.content.length > 500 || candidate.content.length > 700) {
+            return output;
         }
-        // 미번역(출력이 영어 원문 그대로) → 조립 대상 아님
-        if (canon(o.content) === canon(s.content)) continue;
-        const hasKorean = /[가-힣]/.test(o.content);
-        const looksLikeEnglishLeftover =
-            canon(s.content).length >= 15 && canon(o.content).includes(canon(s.content).slice(0, 15));
-        if (!hasKorean || looksLikeEnglishLeftover) return output; // G4: 애매 → 전체 폴백
-        // 부분 괄호가 있으면 그 한글만, 아니면 출력 전체를 한국어로 취급
-        const partial = o.content.match(/\[([^\]]*[가-힣][^\]]*)\]/);
-        const cleanKo = (partial ? partial[1] : o.content).replace(/^\[|\]$/g, '').trim();
-        const [opener, closer] = delims[o.type] || ['"', '"'];
+
+        const strict = candidate.content.match(/^([\s\S]*?)\s+\[([^\]\n]*)\]\s*$/);
+        const strictTranslationValid = strict &&
+            canonizeDialogueForCompare(strict[1]) === canonizeDialogueForCompare(sourceDialogue.content) &&
+            (/[가-힣]/.test(strict[2]) ||
+                isPlaceholderOnlyDialogue(sourceDialogue.content) &&
+                canonizeDialogueForCompare(strict[2]) === canonizeDialogueForCompare(sourceDialogue.content));
+        if (strictTranslationValid) continue;
+
+        const korean = extractKoreanDialogue(sourceDialogue.content, candidate.content);
+        if (!korean) return output;
+        const [opener, closer] = delims[candidate.type] || ['"', '"'];
         repairs.push({
-            index: o.index,
-            len: o.content.length + opener.length + closer.length,
-            replacement: `${opener}${s.content} [${cleanKo}]${closer}`
+            index: candidate.index,
+            len: candidate.content.length + opener.length + closer.length,
+            replacement: `${opener}${sourceDialogue.content} [${korean.trim()}]${closer}`
         });
     }
-    if (repairs.length === 0) return output;
-    let result = output;
-    repairs.sort((a, b) => b.index - a.index); // 뒤에서부터 치환 → 앞 치환이 뒤 offset을 밀지 않음
-    for (const r of repairs) {
-        result = result.slice(0, r.index) + r.replacement + result.slice(r.index + r.len);
+
+    if (repairs.length === 0) return normalizedOutput;
+    let result = normalizedOutput;
+    repairs.sort((a, b) => b.index - a.index);
+    for (const repair of repairs) {
+        result = result.slice(0, repair.index) + repair.replacement +
+            result.slice(repair.index + repair.len);
     }
-    console.log(`[CAT] 🔧 병기 자동 조립: ${repairs.length}개 대사 원문 복원`);
+    console.log(`[CAT] 🔧 앱 병기 조립: ${repairs.length}개 대사 원문 슬롯 복원`);
     return result;
 }
 
-function validateKoEnBilingualDialogue(original, output) {
+export function validateKoEnBilingualDialogue(original, output) {
     const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
         .filter(item =>
             /[A-Za-z]/.test(item.content) &&
@@ -1534,12 +1613,6 @@ function validateKoEnBilingualDialogue(original, output) {
 
     // 🚨 beta.3: 모델의 문장부호 정규화(’→', …→..., —→-) 한 글자에 exact match가
     // 깨져 무한 재시도되던 것 방지 — 비교 전에 양쪽을 같은 표기로 맞춘다.
-    const canonizeForCompare = (value) => String(value || '')
-        .replace(/[’‘]/g, "'")
-        .replace(/…/g, '...')
-        .replace(/[—–]/g, '-')
-        .replace(/\s+/g, ' ')
-        .trim();
     const outputDialogues = collectQuotedSegmentsOutsideFences(output);
     let outputIndex = 0;
     for (let i = 0; i < sourceDialogues.length; i++) {
@@ -1548,6 +1621,19 @@ function validateKoEnBilingualDialogue(original, output) {
         for (; outputIndex < outputDialogues.length; outputIndex++) {
             const candidate = outputDialogues[outputIndex];
             if (candidate.type !== sourceDialogue.type) continue;
+            if (isPlaceholderOnlyDialogue(sourceDialogue.content)) {
+                const placeholderPair = candidate.content.match(/^([\s\S]*?)\s*\[([^\]\n]*)\]\s*$/);
+                const sourceCanon = canonizeDialogueForCompare(sourceDialogue.content);
+                const placeholderOk = placeholderPair
+                    ? canonizeDialogueForCompare(placeholderPair[1]) === sourceCanon &&
+                        canonizeDialogueForCompare(placeholderPair[2]) === sourceCanon
+                    : canonizeDialogueForCompare(candidate.content) === sourceCanon;
+                if (placeholderOk) {
+                    matched = true;
+                    outputIndex++;
+                    break;
+                }
+            }
             const bilingual = candidate.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
             if (!bilingual) {
                 // 🚨 beta.3: 서술 속 짧은 인용구(“surprisingly competent.” 등)를 모델이
@@ -1561,31 +1647,12 @@ function validateKoEnBilingualDialogue(original, output) {
                 }
                 continue;
             }
-            if (canonizeForCompare(bilingual[1]) !== canonizeForCompare(sourceDialogue.content)) {
-                // 🚨 v1.1.5 (L): 인접 대사 병합 허용 — "대사," 서술 "대사." 구조에서
-                // 모델이 한국어 어순상 대사를 하나의 인용구로 합치는 것은 더 자연스러운
-                // 번역이며(1.1.4 제보 로그 실측: "Prank," + "Sure, baby." → 한 인용구),
-                // 이를 붕괴로 오판해 완벽한 병기 전체를 폐기하던 사고 방지.
-                // 판정: 후보 영어부 = 원문 '연속' 대사 i..j를 '순서 그대로' 전부 결합.
-                // 이음새 문장부호 표류(,↔.)만 허용하는 전용 비교(flex)를 쓰며,
-                // 통삭제·순서 뒤집기·내용 창작은 결합 일치가 깨져 여전히 실패한다.
-                const flexForMerge = (value) => canonizeForCompare(value).replace(/[.,]/g, '');
-                const candidateFlex = flexForMerge(bilingual[1]);
-                if (candidateFlex.startsWith(flexForMerge(sourceDialogue.content))) {
-                    let accumulated = sourceDialogue.content;
-                    let mergeEnd = i;
-                    let mergeValid = true;
-                    while (candidateFlex !== flexForMerge(accumulated)) {
-                        mergeEnd++;
-                        if (mergeEnd >= sourceDialogues.length ||
-                            sourceDialogues[mergeEnd].type !== sourceDialogue.type) { mergeValid = false; break; }
-                        accumulated = accumulated + ' ' + sourceDialogues[mergeEnd].content;
-                        if (!candidateFlex.startsWith(flexForMerge(accumulated))) { mergeValid = false; break; }
-                    }
-                    if (mergeValid && candidateFlex === flexForMerge(accumulated)) {
-                        console.log(`[CAT] 🔗 인접 대사 병합 인정: 원문 대사 ${i + 1}~${mergeEnd + 1} → 출력 인용구 1개`);
-                        i = mergeEnd;
-                        matched = true;
+            if (canonizeDialogueForCompare(bilingual[1]) !== canonizeDialogueForCompare(sourceDialogue.content)) {
+                // 원문의 서로 다른 인용구를 하나로 합친 출력은 실제 구조 붕괴다.
+                // 문장부호를 지운 결합 비교로 사면하지 않고 재시도/강등 경로로 보낸다.
+                continue;
+            }
+            matched = true;
             outputIndex++;
             break;
         }
@@ -1596,6 +1663,7 @@ function validateKoEnBilingualDialogue(original, output) {
                 .join('\n');
             return {
                 ok: false,
+                code: 'VALIDATION_BILINGUAL_MISSING_SOURCE',
                 reason: `한영 병기 구조 붕괴: 영어 원문 대사 또는 같은 따옴표 안의 한국어 병기 누락 (대사 ${i + 1})`,
                 detail: `실패한 원문 대사 ${i + 1}: ${JSON.stringify(revealSpecialChars(sourceDialogue.content).slice(0, 160))}\n대조 지점 근처 출력 인용구:\n${nearby || '(남은 출력 인용구 없음)'}`
             };
@@ -1740,6 +1808,19 @@ export function validateTranslationPayload(output, originalText, settings, targe
             ? normalizeBilingualMacroCopiesForValidation(natural)
             : natural;
     const outputStructure = countOutputStructure(structureCheckedNatural);
+    // 매크로 유일 집합 검사도 토큰 복원기와 같은 정책을 사용한다.
+    // 한국어 문법 슬롯만 소프트 생략, 엔티티 매크로 소실·신종은 하드 거부다.
+    const omittedGrammarMacros = [];
+    for (const v of sourceStructure.macros) if (!outputStructure.macros.includes(v)) {
+        if (targetLang === 'Korean' && isKoreanGrammarMacro(v)) {
+            omittedGrammarMacros.push(v);
+            continue;
+        }
+        return { ok: false, reason: `매크로 소실: ${v}` };
+    }
+    for (const v of outputStructure.macros) if (!sourceStructure.macros.includes(v)) {
+        return { ok: false, reason: `원문에 없는 매크로 추가: ${v}` };
+    }
     // 🚨 beta.5: 구분선은 증감 모두 소프트 허용으로 통일 (utils의 compareProtectedStructure와
     // 같은 정책). 실측 오류(8→7, 8→9, 0→5)의 주범이 구분선 1:1 강제였음.
     // 감소 ±2 제한도 철폐 — 펜스/태그가 온전하면 구분선 손실은 미용상 흠집.
@@ -1772,10 +1853,39 @@ export function validateTranslationPayload(output, originalText, settings, targe
         };
     }
     
-    return { ok: true, reason: null, softNote: [dividerSoftNote, vocativeSoftNote].filter(Boolean).join(' / ') || null };
+    const grammarMacroSoftNote = omittedGrammarMacros.length > 0
+        ? `한국어 문법 매크로 생략 허용: ${omittedGrammarMacros.join(', ')}`
+        : null;
+    return {
+        ok: true,
+        reason: null,
+        softNote: [dividerSoftNote, grammarMacroSoftNote, vocativeSoftNote].filter(Boolean).join(' / ') || null
+    };
 }
 
-export function assessTranslationQuality(output, originalText, settings, targetLang) {
+// 🚨 v1.2.0 (작업3-a): 병기 최종 실패 시 '부분 성공 보존' 판정.
+// 원칙: 정상 병기는 살리고 실패 인용구만 한국어로 통과. 단, 인용구 통삭제
+// (출력 인용 수 < 원문 대사 수) 의심이면 보존하지 않고 기존 경로(강등/실패)로.
+export function assessBilingualPartialKeep(original, output) {
+    const src = collectQuotedSegmentsOutsideFences(original).filter(item =>
+        /[A-Za-z]/.test(item.content) &&
+        !isBareWordScareQuote(item.content) &&
+        !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content));
+    if (src.length === 0) return { keep: false };
+    // 인용구 '개수' 가드는 쓰지 않는다 — 긴 인용이 작은따옴표('…')로 바뀌면
+    // 수집기에 안 잡혀 개수가 줄어드는 게 바로 보존해야 할 표적 케이스이기 때문.
+    // 대신 '미보존 과반' 가드: 절반을 넘게 잃었으면 부분이 아니라 붕괴 → 강등 폴백.
+    // 존재 검사용 canon: L 사면과 동일하게 이음 부호 표류(,↔.)는 관용 — !? 는 유지
+    const canon = v => String(v || '').replace(/[\u2019\u2018]/g, "'").replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const hay = canon(output);
+    let missing = 0;
+    for (const d of src) if (!hay.includes(canon(d.content))) missing++;
+    if (missing === 0) return { keep: false };
+    if (missing * 2 > src.length) return { keep: false, total: src.length, missing };
+    return { keep: true, total: src.length, missing };
+}
+
+function assessTranslationQuality(output, originalText, settings, targetLang) {
     const natural = splitLiteralAppendix(output).natural || '';
     const source = String(originalText || '');
     const issues = [];
@@ -1912,7 +2022,9 @@ function countOutputStructure(text) {
     return {
         fences: (source.match(/```/g) || []).length,
         backticks: (source.match(/`/g) || []).length,
-        tags: (source.match(/<!--|-->|<\/?[a-zA-Z][^>]*>|\{\{[\s\S]*?\}\}/g) || []).length,
+        // 🚨 v1.2.0 (층7): 매크로를 태그 집계에서 분리 — placeholder는 별도 축
+        tags: (source.match(/<!--|-->|<\/?[a-zA-Z][^>]*>/g) || []).length,
+        macros: Array.from(new Set((source.match(/\{\{[\s\S]*?\}\}/g) || []).map(v => v.toLowerCase()))),
         rules: (source.match(/^(?:[\t \u00A0]*)(?:-{3,}|_{3,}|\*{3,})(?:[\t \u00A0]*)$/gm) || []).length
     };
 }
@@ -2098,11 +2210,12 @@ The natural translation (Step 1) must NOT contain the marker, the "»" prefix, o
         }[bilingualMode] || 'English';
         parts.push(`
 [BILINGUAL DIALOGUE MODE]
-Translate every narration, action, thought, scene description, and speech tag fully into Korean.
-Only inside each quotation pair, preserve the original ${sourceLanguage} dialogue and append exactly one consolidated Korean translation block immediately before the closing quote:
-"<complete original dialogue> [<complete Korean translation>]"
-One quotation pair gets one bracket block, even when it contains several sentences. Never split brackets sentence by sentence, reverse the languages, put brackets outside the quote, retain source narration, or drop either dialogue half.
-Example: He looked back. "Wait. Don't go." → 그는 뒤를 돌아봤다. "Wait. Don't go. [기다려. 가지 마.]"`);
+The application assembles the final ${sourceLanguage}+Korean bilingual dialogue after generation.
+Translate every narration, action, thought, scene description, speech tag, and dialogue fully into Korean.
+Inside each quotation pair output KOREAN ONLY. Do not copy the original dialogue and do not add square-bracket translations.
+Preserve every source quotation pair as exactly one separate output quotation pair in the same order. Never merge dialogue across narration or speech tags and never split one dialogue slot.
+Tokens immediately inside a quotation are paired hard dialogue boundaries. Keep each pair exactly once around only that quotation's Korean translation.
+Required model payload example: He looked back. "Wait. Don't go." → 그는 뒤를 돌아봤다. "기다려. 가지 마."`);
     } else {
         parts.push(`
 [STANDARD TRANSLATION MODE]
@@ -2272,29 +2385,6 @@ ${matchedLines.join('\n')}`);
     }
     
     // 🚨 말투 패턴 분석 결과 주입 (정규식 기반)
-    if (contextMessages.length > 0) {
-        const speechPatterns = analyzeSpeechPatterns(contextMessages);
-        if (speechPatterns) {
-            parts.push(`\n[Speech Patterns from Context - Reference for character voice. Apply only to dialogue, NOT narration]\n${speechPatterns}\n[NOTE: For narration/description outside dialogue, use the style preset above. Do NOT force these patterns onto narration.]`);
-        }
-        
-        const voiceReferences = contextMessages
-            .filter(msg => typeof msg === 'object' && msg.voiceText)
-            .map(msg => `[${msg.speaker}] ${clipPromptText(msg.voiceText, 320)}`);
-        if (voiceReferences.length > 0) {
-            parts.push(`\n[Korean Voice Reference - REGISTER & NAMES]
-Use these prior Korean lines to preserve each speaker's 반말/존댓말, vocabulary register, and rhythm.
-ALSO follow their spelling of proper nouns, character names, and forms of address (호칭) — if a prior line writes a name or title a certain way, keep that exact form. This includes user-corrected lines.
-Do NOT use them as factual context and do NOT copy their sentences or phrasing.
-${voiceReferences.join('\n')}`);
-        }
-    }
-    
-    // 🚨 캐릭터 카드 힌트 주입 (RP 배경/성격 컨텍스트)
-    if (characterHints) {
-        parts.push(`\n[Character Background - Use as reference for tone/setting consistency. Do NOT translate this:]\n${characterHints}`);
-    }
-    
     if (contextMessages.length > 0) {
         const speechPatterns = analyzeSpeechPatterns(contextMessages);
         if (speechPatterns) {

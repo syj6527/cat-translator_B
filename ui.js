@@ -3,7 +3,7 @@
 // ============================================================
 import { CAT_BETA_VERSION, catNotify, catNotifyProgress, getThemeEmoji, getCompletionEmoji, getModelTheme, setTextareaValue, resolveInputTranslationDirection, resolveInputUserPrompt } from './utils.js';
 import { getStats, clearAllCache, exportSettings, importSettings, getHistory, togglePin, deleteHistoryItem } from './cache.js';
-import { fetchTranslation, gatherContextMessages, SYSTEM_SHIELD, STYLE_PRESETS, getLastDebugLog } from './translator.js';
+import { fetchTranslation, gatherContextMessages, SYSTEM_SHIELD, STYLE_PRESETS, getLastDebugLog, getTranslationStats } from './translator.js';
 
 let bulkAbortController = null;
 let isTranslatingInput = false;
@@ -126,7 +126,7 @@ export function setupSettingsPanel(settings, stContext, saveSettingsFn) {
     const html = `
     <div id="cat-trans-container" class="inline-drawer">
         <div id="cat-drawer-header" class="inline-drawer-header interactable" tabindex="0">
-            <div class="inline-drawer-title"><span class="cat-beta-brand-emoji">🙀</span><span>Translator Beta</span></div>
+            <div class="inline-drawer-title"><span class="cat-beta-brand-emoji">🐱</span><span>Cat Translator</span></div>
             <i id="cat-drawer-toggle" class="inline-drawer-toggle fa-fw fa-solid fa-circle-chevron-down inline-drawer-icon down interactable"></i>
         </div>
         <div id="cat-drawer-content" class="inline-drawer-content" style="display:none; padding:10px;">
@@ -898,7 +898,7 @@ function showDebugPopup() {
     <dialog class="cat-debug-overlay" style="background:rgba(0,0,0,0.6); z-index:2147483647; display:none;">
         <div class="cat-debug-modal" style="background:var(--SmartThemeBodyColor, #222); color:var(--SmartThemeEmColor, #fff);">
             <div class="cat-debug-header">
-                <div class="cat-debug-title" style="font-size:1.1em; font-weight:bold;">🙀 마지막 LLM 응답 / 에러 로그</div>
+                <div class="cat-debug-title" style="font-size:1.1em; font-weight:bold;">🐱 마지막 LLM 응답 / 에러 로그</div>
                 <span class="cat-debug-close" style="cursor:pointer; font-size:1.5em; opacity:0.6; padding:4px 8px;">✕</span>
             </div>
             <div class="cat-debug-body">
@@ -976,9 +976,44 @@ function showDebugPopup() {
         const attemptLines = Array.isArray(log?.attempts) && log.attempts.length
             ? log.attempts.map((a, i) => `${i + 1}차 [${a.time}] (${a.path}) ${a.reason}${a.detail ? '\n    ' + String(a.detail).replace(/\n/g, '\n    ') : ''}`).join('\n')
             : null;
-        const copyText = `[🙀 Translator Beta 디버그 로그]\n버전: ${CAT_BETA_VERSION}\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}${log?.validationDetail ? '\n\n--- 검증 상세 ---\n' + log.validationDetail : ''}${attemptLines ? '\n\n--- 시도 이력 ---\n' + attemptLines : ''}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
-        navigator.clipboard.writeText(copyText).then(() => catNotify('📋 디버그 로그 복사 완료!', 'success')).catch(() => catNotify('복사 실패 — 수동으로 복사해주세요', 'warning'));
+        const _st = getTranslationStats();
+        const _stLine = `세션 통계: 번역 ${_st.started} · 성공 ${_st.success} (부분병기 ${_st.partialBilingual} · 강등 ${_st.softDegrade}) · 실패 ${_st.hardFail} · 중단 ${_st.aborted}`;
+        const copyText = `[🐱🔬 Cat Translator Lab 디버그 로그]\n버전: ${CAT_BETA_VERSION}\n${_stLine}\n시각: ${ts}\n모드: ${mode}\n모델: ${model}\n에러: ${error}\n복구: ${recovery}${log?.validationDetail ? '\n\n--- 검증 상세 ---\n' + log.validationDetail : ''}${attemptLines ? '\n\n--- 시도 이력 ---\n' + attemptLines : ''}\n\n--- 프롬프트 ---\n${log?.prompt || '없음'}\n\n--- LLM 응답 ---\n${log?.rawResponse || '없음'}\n\n--- 후처리 결과 ---\n${log?.cleaned || '없음'}${thought ? '\n\n--- 사고 과정 ---\n' + thought : ''}`;
+        catCopyToClipboard(copyText).then(ok => ok
+            ? catNotify('📋 디버그 로그 복사 완료!', 'success')
+            : catNotify('복사 실패 — 로그 창의 텍스트를 길게 눌러 수동 복사해주세요', 'warning'));
     });
+}
+
+// 🚨 v1.1.13 (S): 비보안 컨텍스트(HTTP LAN 접속) 대응 클립보드 헬퍼.
+// navigator.clipboard는 HTTPS/localhost에서만 존재 — 폰에서 http://192.168.x.x로
+// 접속하면 undefined라 기존 단독 호출이 알림도 없이 즉사했음 ("로그복사도 안 됨"
+// 제보의 원인). 모바일 http 사용자들이 로그를 '안' 보낸 게 아니라 '못' 보냈던 것.
+// 1차: 표준 API → 실패/부재 시 2차: 임시 textarea + execCommand 폴백.
+async function catCopyToClipboard(text) {
+    try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (_) { /* 폴백으로 진행 */ }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.top = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length); // iOS 대응
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+    } catch (_) {
+        return false;
+    }
 }
 
 function showBulkPopup(event, settings, stContext, processMessageFn) {

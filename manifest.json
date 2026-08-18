@@ -1,8 +1,8 @@
 {
-    "name": "cat-translator-beta",
-    "display_name": "🙀 Translator Beta",
-    "version": "1.1.12-beta.1",
-    "description": "🙀 Translator Beta: 맞춤형 튜닝 UI & 스마트 자동번역",
+    "name": "cat-translator-lab",
+    "display_name": "🐱🔬 Cat Translator Lab",
+    "version": "1.2.0-lab.4",
+    "description": "🔬 비공개 실험 채널 — 대사 경계 고정 병기 조립",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
     "css": "style.css"
