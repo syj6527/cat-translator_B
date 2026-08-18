@@ -1,8 +1,8 @@
 {
     "name": "cat-translator-lab",
     "display_name": "🐱🔬 Cat Translator Lab",
-    "version": "1.2.0-lab.8",
-    "description": "🔬 비공개 실험 채널 — 관대한 출력·병기 완성률 분리",
+    "version": "1.2.0-lab.9",
+    "description": "🔬 비공개 실험 채널 — 혼합 언어 대사 슬롯 정렬",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
     "css": "style.css"

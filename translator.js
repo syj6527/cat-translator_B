@@ -602,9 +602,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     const dialogueBilingualOn = settings.dialogueBilingual && settings.dialogueBilingual !== 'off';
     const dialogueRanges = dialogueBilingualOn && !isToEnglish
         ? collectQuotedSegmentsOutsideFences(sourceText)
-            .filter(item => /[A-Za-z]|\{\{[\s\S]*?\}\}/.test(item.content))
-            .filter(item => !isBareWordScareQuote(item.content))
-            .filter(item => !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content))
+            .filter(item => shouldAssembleKoEnDialogue(item.content))
             .map(item => ({
                 index: item.index,
                 contentLength: item.content.length,
@@ -1578,6 +1576,37 @@ function isPlaceholderOnlyDialogue(content) {
     return readable.length === 0;
 }
 
+// 목표 언어가 한국어일 때 원문부터 이미 한국어인 인용구는 번역·병기 대상이 아니다.
+// 다만 전체 따옴표 순서에서는 반드시 한 슬롯을 차지해야 뒤쪽 영문 대사가 밀리지 않는다.
+// 매크로를 제외한 영단어가 하나뿐이면 한국어 대사 속 고유명사로 보고 통과시킨다.
+function isKoreanPassThroughDialogue(content) {
+    const readable = String(content || '')
+        .replace(/\{\{[\s\S]*?\}\}|@@[A-Za-z0-9_]+_\d{4}@@/g, '')
+        .replace(/\[[^\]\n]*\]\s*$/g, '')
+        .replace(/[*_~`]/g, ' ');
+    const hangulCount = (readable.match(/[가-힣]/g) || []).length;
+    const englishWords = readable.match(/\b[A-Za-z]+(?:['’][A-Za-z]+)?\b/g) || [];
+    return hangulCount > 0 && englishWords.length <= 1;
+}
+
+// 조립기·보호기·검증기가 반드시 같은 판정을 공유해야 한다.
+// 한국어 통과 슬롯과 서술 속 맨단어 인용은 제외하고, 매크로 전용 대사는 기존처럼
+// 독립 병기 슬롯으로 유지한다.
+function shouldAssembleKoEnDialogue(content) {
+    const value = String(content || '');
+    if (/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(value)) return false;
+    if (isKoreanPassThroughDialogue(value)) return false;
+    if (isPlaceholderOnlyDialogue(value)) return true;
+    return /[A-Za-z]/.test(value) && !isBareWordScareQuote(value);
+}
+
+function getDialogueDelimiters(type) {
+    const delims = {
+        double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
+    };
+    return delims[type] || ['"', '"'];
+}
+
 function extractKoreanDialogue(sourceContent, candidateContent) {
     const sourceCanon = canonizeDialogueForCompare(sourceContent);
     const candidate = String(candidateContent || '').trim();
@@ -1614,7 +1643,7 @@ function extractKoreanDialogue(sourceContent, candidateContent) {
 // 일반적인 [stage direction]을 병기로 오인하지 않는다.
 function normalizeMalformedBilingualQuoteLayout(original, output) {
     const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
-        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
+        .filter(item => shouldAssembleKoEnDialogue(item.content));
     const byCanon = new Map(sourceDialogues.map(item => [canonizeDialogueForCompare(item.content), item.content]));
     if (byCanon.size === 0) return output;
 
@@ -1639,40 +1668,82 @@ function normalizeMalformedBilingualQuoteLayout(original, output) {
 // 인용구 개수가 어긋나도 순서대로 복원 가능한 슬롯은 최대한 병기로 살린다.
 // 최종 실패 시 한국어 전용으로 강등하지 않기 위한 fail-open 조립기다.
 export function repairBilingualPartially(original, output) {
-    const src = collectQuotedSegmentsOutsideFences(original)
-        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
-    if (src.length === 0) return { text: output, repaired: 0, total: 0, missing: 0 };
+    const sourceSlots = collectQuotedSegmentsOutsideFences(original);
+    const sourceTargets = sourceSlots.filter(item => shouldAssembleKoEnDialogue(item.content));
+    if (sourceTargets.length === 0) return { text: output, repaired: 0, total: 0, missing: 0 };
 
     const normalizedOutput = normalizeMalformedBilingualQuoteLayout(original, output);
     const out = collectQuotedSegmentsOutsideFences(normalizedOutput);
     if (out.length === 0) {
-        return { text: normalizedOutput, repaired: 0, total: src.length, missing: src.length };
+        return {
+            text: normalizedOutput,
+            repaired: 0,
+            total: sourceTargets.length,
+            missing: sourceTargets.length
+        };
     }
 
-    const delims = {
-        double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
-    };
     const repairs = [];
-    let sourceIndex = 0;
-    for (const candidate of out) {
-        if (sourceIndex >= src.length) break;
-        if (/\n/.test(candidate.content) || candidate.content.length > 1200) continue;
-
-        const sourceDialogue = src[sourceIndex];
+    let repairedCount = 0;
+    const addTargetRepair = (sourceDialogue, candidate) => {
+        if (/\n/.test(candidate.content) || candidate.content.length > 1200) return false;
         let korean = extractKoreanDialogue(sourceDialogue.content, candidate.content);
         if (!korean && /[가-힣]/.test(candidate.content)) {
             const bracketKorean = candidate.content.match(/\[([^\]\n]*[가-힣][^\]\n]*)\]/)?.[1];
             korean = bracketKorean || candidate.content;
         }
-        if (!korean) continue;
-
-        const [opener, closer] = delims[candidate.type] || ['"', '"'];
+        if (!korean) return false;
+        const [candidateOpener, candidateCloser] = getDialogueDelimiters(candidate.type);
+        const [sourceOpener, sourceCloser] = getDialogueDelimiters(sourceDialogue.type);
         repairs.push({
             index: candidate.index,
-            len: candidate.content.length + opener.length + closer.length,
-            replacement: `${opener}${sourceDialogue.content} [${korean.trim()}]${closer}`
+            len: candidate.content.length + candidateOpener.length + candidateCloser.length,
+            replacement: `${sourceOpener}${sourceDialogue.content} [${korean.trim()}]${sourceCloser}`
         });
-        sourceIndex++;
+        repairedCount++;
+        return true;
+    };
+
+    if (sourceSlots.length === out.length) {
+        // 가장 안전한 경로: 모든 따옴표 슬롯을 1:1로 소비한다. 한국어 원문 슬롯은
+        // 원문 그대로 복원하되 병기 성공률의 분자·분모에는 포함하지 않는다.
+        for (let i = 0; i < sourceSlots.length; i++) {
+            const sourceDialogue = sourceSlots[i];
+            const candidate = out[i];
+            if (isKoreanPassThroughDialogue(sourceDialogue.content)) {
+                const [candidateOpener, candidateCloser] = getDialogueDelimiters(candidate.type);
+                const [sourceOpener, sourceCloser] = getDialogueDelimiters(sourceDialogue.type);
+                repairs.push({
+                    index: candidate.index,
+                    len: candidate.content.length + candidateOpener.length + candidateCloser.length,
+                    replacement: `${sourceOpener}${sourceDialogue.content}${sourceCloser}`
+                });
+                continue;
+            }
+            if (shouldAssembleKoEnDialogue(sourceDialogue.content)) {
+                addTargetRepair(sourceDialogue, candidate);
+            }
+        }
+    } else {
+        // 슬롯 개수까지 어긋난 부분 복구에서는 원문과 정확히 같은 한국어 통과 슬롯을
+        // 후보에서 먼저 제외한다. 비명이 뒤 영문 대사의 번역으로 소비되는 일을 막는다.
+        const passCounts = new Map();
+        for (const slot of sourceSlots.filter(item => isKoreanPassThroughDialogue(item.content))) {
+            const key = canonizeDialogueForCompare(slot.content);
+            passCounts.set(key, (passCounts.get(key) || 0) + 1);
+        }
+        const targetCandidates = out.filter(candidate => {
+            const key = canonizeDialogueForCompare(candidate.content);
+            const remaining = passCounts.get(key) || 0;
+            if (remaining <= 0) return true;
+            passCounts.set(key, remaining - 1);
+            return false;
+        });
+        let sourceIndex = 0;
+        for (const candidate of targetCandidates) {
+            if (sourceIndex >= sourceTargets.length) break;
+            if (addTargetRepair(sourceTargets[sourceIndex], candidate)) sourceIndex++;
+        }
     }
 
     let result = normalizedOutput;
@@ -1681,14 +1752,14 @@ export function repairBilingualPartially(original, output) {
         result = result.slice(0, repair.index) + repair.replacement +
             result.slice(repair.index + repair.len);
     }
-    if (repairs.length > 0) {
-        console.log(`[CAT] 🧩 부분 병기 앱 조립: ${repairs.length}/${src.length}개`);
+    if (repairedCount > 0) {
+        console.log(`[CAT] 🧩 부분 병기 앱 조립: ${repairedCount}/${sourceTargets.length}개`);
     }
     return {
         text: result,
-        repaired: repairs.length,
-        total: src.length,
-        missing: Math.max(0, src.length - repairs.length)
+        repaired: repairedCount,
+        total: sourceTargets.length,
+        missing: Math.max(0, sourceTargets.length - repairedCount)
     };
 }
 
@@ -1696,21 +1767,32 @@ export function repairBilingualPartially(original, output) {
 // LLM 출력에서는 한국어 대사만 추출하고 영어 슬롯은 원문에서 그대로 복사한다.
 // 1:1이면 엄격 조립하고, 개수 불일치는 부분 조립으로 결과를 최대한 보존한다.
 export function repairBilingualByAlignment(original, output) {
-    const src = collectQuotedSegmentsOutsideFences(original)
-        .filter(item => /[A-Za-z]/.test(item.content) && !isBareWordScareQuote(item.content));
-    if (src.length === 0) return output;
+    const sourceSlots = collectQuotedSegmentsOutsideFences(original);
+    const sourceTargets = sourceSlots.filter(item => shouldAssembleKoEnDialogue(item.content));
+    if (sourceTargets.length === 0) return output;
 
     const normalizedOutput = normalizeMalformedBilingualQuoteLayout(original, output);
     const out = collectQuotedSegmentsOutsideFences(normalizedOutput);
-    if (src.length !== out.length) return repairBilingualPartially(original, normalizedOutput).text;
+    if (sourceSlots.length !== out.length) {
+        return repairBilingualPartially(original, normalizedOutput).text;
+    }
 
-    const delims = {
-        double: ['"', '"'], curly: ['“', '”'], corner: ['「', '」'], 'white-corner': ['『', '』']
-    };
     const repairs = [];
-    for (let i = 0; i < src.length; i++) {
-        const sourceDialogue = src[i];
+    let assembledCount = 0;
+    for (let i = 0; i < sourceSlots.length; i++) {
+        const sourceDialogue = sourceSlots[i];
         const candidate = out[i];
+        if (isKoreanPassThroughDialogue(sourceDialogue.content)) {
+            const [candidateOpener, candidateCloser] = getDialogueDelimiters(candidate.type);
+            const [sourceOpener, sourceCloser] = getDialogueDelimiters(sourceDialogue.type);
+            repairs.push({
+                index: candidate.index,
+                len: candidate.content.length + candidateOpener.length + candidateCloser.length,
+                replacement: `${sourceOpener}${sourceDialogue.content}${sourceCloser}`
+            });
+            continue;
+        }
+        if (!shouldAssembleKoEnDialogue(sourceDialogue.content)) continue;
         if (sourceDialogue.type !== candidate.type || /\n/.test(candidate.content) ||
             sourceDialogue.content.length > 500 || candidate.content.length > 700) {
             return repairBilingualPartially(original, normalizedOutput).text;
@@ -1722,16 +1804,21 @@ export function repairBilingualByAlignment(original, output) {
             (/[가-힣]/.test(strict[2]) ||
                 isPlaceholderOnlyDialogue(sourceDialogue.content) &&
                 canonizeDialogueForCompare(strict[2]) === canonizeDialogueForCompare(sourceDialogue.content));
-        if (strictTranslationValid) continue;
+        if (strictTranslationValid) {
+            assembledCount++;
+            continue;
+        }
 
         const korean = extractKoreanDialogue(sourceDialogue.content, candidate.content);
         if (!korean) return repairBilingualPartially(original, normalizedOutput).text;
-        const [opener, closer] = delims[candidate.type] || ['"', '"'];
+        const [candidateOpener, candidateCloser] = getDialogueDelimiters(candidate.type);
+        const [sourceOpener, sourceCloser] = getDialogueDelimiters(sourceDialogue.type);
         repairs.push({
             index: candidate.index,
-            len: candidate.content.length + opener.length + closer.length,
-            replacement: `${opener}${sourceDialogue.content} [${korean.trim()}]${closer}`
+            len: candidate.content.length + candidateOpener.length + candidateCloser.length,
+            replacement: `${sourceOpener}${sourceDialogue.content} [${korean.trim()}]${sourceCloser}`
         });
+        assembledCount++;
     }
 
     if (repairs.length === 0) return normalizedOutput;
@@ -1741,49 +1828,98 @@ export function repairBilingualByAlignment(original, output) {
         result = result.slice(0, repair.index) + repair.replacement +
             result.slice(repair.index + repair.len);
     }
-    console.log(`[CAT] 🔧 앱 병기 조립: ${repairs.length}개 대사 원문 슬롯 복원`);
+    console.log(`[CAT] 🔧 앱 병기 조립: ${assembledCount}/${sourceTargets.length}개 병기 슬롯 조립`);
     return result;
 }
 
 export function validateKoEnBilingualDialogue(original, output) {
-    const sourceDialogues = collectQuotedSegmentsOutsideFences(original)
-        .filter(item =>
-            /[A-Za-z]/.test(item.content) &&
-            // 🚨 v1.1.4-beta.4 (G): 문장부호 없는 맨단어 인용 강조는 병기 필수에서 면제
-            !isBareWordScareQuote(item.content) &&
-            !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content)
-        );
+    const sourceSlots = collectQuotedSegmentsOutsideFences(original);
+    const sourceDialogues = sourceSlots.filter(item => shouldAssembleKoEnDialogue(item.content));
     if (sourceDialogues.length === 0) return { ok: true, reason: null };
 
     // 🚨 beta.3: 모델의 문장부호 정규화(’→', …→..., —→-) 한 글자에 exact match가
     // 깨져 무한 재시도되던 것 방지 — 비교 전에 양쪽을 같은 표기로 맞춘다.
-    const outputDialogues = collectQuotedSegmentsOutsideFences(output);
+    const allOutputDialogues = collectQuotedSegmentsOutsideFences(output);
+    const candidateMatchesSource = (sourceDialogue, candidate) => {
+        if (candidate.type !== sourceDialogue.type) return false;
+        if (isPlaceholderOnlyDialogue(sourceDialogue.content)) {
+            const placeholderPair = candidate.content.match(/^([\s\S]*?)\s*\[([^\]\n]*)\]\s*$/);
+            const sourceCanon = canonizeDialogueForCompare(sourceDialogue.content);
+            return placeholderPair
+                ? canonizeDialogueForCompare(placeholderPair[1]) === sourceCanon &&
+                    canonizeDialogueForCompare(placeholderPair[2]) === sourceCanon
+                : canonizeDialogueForCompare(candidate.content) === sourceCanon;
+        }
+        const bilingual = candidate.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
+        return Boolean(bilingual &&
+            canonizeDialogueForCompare(bilingual[1]) === canonizeDialogueForCompare(sourceDialogue.content));
+    };
+
+    // 전체 슬롯 수가 같으면 같은 인덱스끼리만 검증한다. 한국어 원문 슬롯을 건너뛴
+    // 뒤쪽 영문 대사가 앞 슬롯의 한국어와 잘못 결합해도 통과하던 false-pass 차단.
+    if (sourceSlots.length === allOutputDialogues.length) {
+        let targetNumber = 0;
+        for (let i = 0; i < sourceSlots.length; i++) {
+            const sourceDialogue = sourceSlots[i];
+            const candidate = allOutputDialogues[i];
+            if (isKoreanPassThroughDialogue(sourceDialogue.content)) {
+                if (canonizeDialogueForCompare(candidate.content) !==
+                    canonizeDialogueForCompare(sourceDialogue.content)) {
+                    return {
+                        ok: false,
+                        code: 'VALIDATION_KOREAN_DIALOGUE_CHANGED',
+                        reason: `한국어 원문 대사 변경 또는 슬롯 이동 (따옴표 ${i + 1})`,
+                        detail: `원문: ${JSON.stringify(revealSpecialChars(sourceDialogue.content))}\n출력: ${JSON.stringify(revealSpecialChars(candidate.content))}`
+                    };
+                }
+                continue;
+            }
+            if (!shouldAssembleKoEnDialogue(sourceDialogue.content)) continue;
+            targetNumber++;
+            if (!candidateMatchesSource(sourceDialogue, candidate)) {
+                return {
+                    ok: false,
+                    code: 'VALIDATION_BILINGUAL_SLOT_MISMATCH',
+                    reason: `한영 병기 슬롯 불일치 (대사 ${targetNumber}, 전체 따옴표 ${i + 1})`,
+                    detail: `원문 대사: ${JSON.stringify(revealSpecialChars(sourceDialogue.content))}\n출력 슬롯: ${JSON.stringify(revealSpecialChars(candidate.content))}`
+                };
+            }
+        }
+        return { ok: true, reason: null };
+    }
+
+    // 개수 불일치 fallback에서도 원문과 정확히 같은 한국어 통과 슬롯은 후보에서
+    // 먼저 소비한다. 단순 순번 검색이 뒤 영문 대사와 엮는 것을 막는다.
+    const passCounts = new Map();
+    for (const slot of sourceSlots.filter(item => isKoreanPassThroughDialogue(item.content))) {
+        const key = canonizeDialogueForCompare(slot.content);
+        passCounts.set(key, (passCounts.get(key) || 0) + 1);
+    }
+    const outputDialogues = allOutputDialogues.filter(candidate => {
+        const key = canonizeDialogueForCompare(candidate.content);
+        const remaining = passCounts.get(key) || 0;
+        if (remaining <= 0) return true;
+        passCounts.set(key, remaining - 1);
+        return false;
+    });
+    const hasKoreanPassThrough = sourceSlots.some(item => isKoreanPassThroughDialogue(item.content));
     let outputIndex = 0;
     for (let i = 0; i < sourceDialogues.length; i++) {
         const sourceDialogue = sourceDialogues[i];
         let matched = false;
         for (; outputIndex < outputDialogues.length; outputIndex++) {
             const candidate = outputDialogues[outputIndex];
-            if (candidate.type !== sourceDialogue.type) continue;
-            if (isPlaceholderOnlyDialogue(sourceDialogue.content)) {
-                const placeholderPair = candidate.content.match(/^([\s\S]*?)\s*\[([^\]\n]*)\]\s*$/);
-                const sourceCanon = canonizeDialogueForCompare(sourceDialogue.content);
-                const placeholderOk = placeholderPair
-                    ? canonizeDialogueForCompare(placeholderPair[1]) === sourceCanon &&
-                        canonizeDialogueForCompare(placeholderPair[2]) === sourceCanon
-                    : canonizeDialogueForCompare(candidate.content) === sourceCanon;
-                if (placeholderOk) {
-                    matched = true;
-                    outputIndex++;
-                    break;
-                }
+            if (candidateMatchesSource(sourceDialogue, candidate)) {
+                matched = true;
+                outputIndex++;
+                break;
             }
             const bilingual = candidate.content.match(/^([\s\S]*?)\s+\[([^\]]*[가-힣][^\]]*)\]\s*$/);
             if (!bilingual) {
                 // 🚨 beta.3: 서술 속 짧은 인용구(“surprisingly competent.” 등)를 모델이
                 // 대사가 아니라고 판단해 한국어로만 번역한 경우 허용. 짧은 대사의 병기
                 // 반쪽 누락과 구분은 불가하지만, 오탐 무한 재시도가 더 큰 손해다.
-                if (sourceDialogue.content.length <= 80 &&
+                if (!hasKoreanPassThrough && sourceDialogue.content.length <= 80 &&
                     !/[A-Za-z]/.test(candidate.content) && /[가-힣]/.test(candidate.content)) {
                     matched = true;
                     outputIndex++;
@@ -2026,9 +2162,7 @@ export function validateTranslationPayload(output, originalText, settings, targe
 // 정상 병기는 하나라도 살리고 실패 인용구는 번역 결과 그대로 통과시킨다.
 export function assessBilingualPartialKeep(original, output) {
     const src = collectQuotedSegmentsOutsideFences(original).filter(item =>
-        /[A-Za-z]/.test(item.content) &&
-        !isBareWordScareQuote(item.content) &&
-        !/\[[^\]]*[가-힣][^\]]*\]\s*$/.test(item.content));
+        shouldAssembleKoEnDialogue(item.content));
     if (src.length === 0) return { keep: false };
     // 인용구 개수나 보존 비율로 전체 결과를 폐기하지 않는다. 1/N만 병기여도
     // 한국어 전용 강등보다는 사용자가 요청한 모드를 더 많이 보존한다.
