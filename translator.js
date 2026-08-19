@@ -2,7 +2,7 @@
 // 🐱 Translator v1.1.0 - translator.js
 // ============================================================
 import { secret_state, SECRET_KEYS } from '../../../../scripts/secrets.js';
-import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, auditDividerLines, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, isKoreanGrammarMacro, analyzeLanguage, isClearlyLanguage } from './utils.js';
+import { cleanResult, catNotify, detectLanguageDirection, stripMetaForDetection, getThemeEmoji, getCompletionEmoji, getCacheModelKey, applyPreReplaceWithCount, getMatchedDictionaryLines, analyzeSpeechPatterns, splitLiteralAppendix, revealSpecialChars, auditDividerLines, protectTranslationStructure, restoreTranslationStructure, restoreTranslationTokens, validateTranslationStructure, normalizeBilingualMacroCopiesForValidation, isKoreanGrammarMacro, analyzeLanguage, isClearlyLanguage } from './utils.js';
 import { deleteCached, getCached, setCached } from './cache.js';
 
 const LEGACY_SYSTEM_SHIELD = `[ABSOLUTE DIRECTIVE - VIOLATION = FAILURE]
@@ -431,8 +431,105 @@ const SAFETY_SETTINGS = [
 ];
 
 // 🚨 디버그 로그: 마지막 요청/응답 저장 (설정창에서 확인 가능)
-let _lastDebugLog = { timestamp: null, mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: null, thought: null, recovery: null };
-export function getLastDebugLog() { return _lastDebugLog; }
+const EMPTY_DEBUG_LOG = () => ({
+    timestamp: null,
+    mode: '',
+    model: '',
+    prompt: '',
+    rawResponse: '',
+    cleaned: '',
+    error: null,
+    thought: null,
+    assembly: null,
+    recovery: null,
+    notes: null,
+    glossary: null
+});
+let _lastDebugLog = EMPTY_DEBUG_LOG();
+let _debugSecretValues = [];
+
+function setDebugSecretValues(values) {
+    _debugSecretValues = Array.from(new Set(
+        (values || [])
+            .map(value => String(value || '').trim())
+            .filter(value => value.length >= 8)
+    )).sort((a, b) => b.length - a.length);
+}
+
+export function sanitizeDebugText(value, extraSecrets = []) {
+    let text = String(value ?? '');
+    const knownSecrets = Array.from(new Set([
+        ..._debugSecretValues,
+        ...(extraSecrets || []).map(secret => String(secret || '').trim())
+    ])).filter(secret => secret.length >= 8).sort((a, b) => b.length - a.length);
+    for (const secret of knownSecrets) text = text.split(secret).join('[비공개]');
+
+    return text
+        .replace(/-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----/g, '[비공개 개인 키]')
+        .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[비공개 API 키]')
+        .replace(/\b(?:sk|gsk|xai)[-_][0-9A-Za-z_-]{16,}\b/gi, '[비공개 API 키]')
+        .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[비공개 API 키]')
+        .replace(/\bya29\.[0-9A-Za-z_-]{12,}\b/g, '[비공개 액세스 토큰]')
+        .replace(/\beyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\b/g, '[비공개 JWT]')
+        .replace(/\bBearer\s+[0-9A-Za-z._~+/=-]{8,}/gi, 'Bearer [비공개]')
+        .replace(/([?&](?:key|api[_-]?key|apikey|access[_-]?token)=)[^&#\s]+/gi, '$1[비공개]')
+        .replace(/("(?:api[_-]?key|apikey|access[_-]?token|authorization|token|secret|private[_-]?key)"\s*:\s*")[^"]*(")/gi, '$1[비공개]$2')
+        .replace(/((?:api[_-]?key|apikey|access[_-]?token|authorization|token|secret|private[_-]?key)\s*[=:]\s*)(["']?)[^\s"',;&}\]]{8,}\2/gi, '$1[비공개]');
+}
+
+function sanitizeDebugValue(value, seen = new WeakSet()) {
+    if (typeof value === 'string') return sanitizeDebugText(value);
+    if (value === null || typeof value !== 'object') return value;
+    if (seen.has(value)) return '[순환 참조 생략]';
+    seen.add(value);
+    if (Array.isArray(value)) return value.map(item => sanitizeDebugValue(item, seen));
+    return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, sanitizeDebugValue(item, seen)])
+    );
+}
+
+export function getLastDebugLog() { return sanitizeDebugValue(_lastDebugLog); }
+
+const DEBUG_MODEL_KEYS = [
+    'model', 'modelName', 'model_name', 'modelId', 'model_id',
+    'modelVersion', 'model_version', 'customModel', 'custom_model',
+    'selectedModel', 'selected_model'
+];
+const DEBUG_MODEL_CONTAINERS = [
+    'settings', 'config', 'connection', 'api', 'apiSettings',
+    'parameters', 'params', 'provider'
+];
+
+function findDebugModelName(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 3) return '';
+    for (const key of DEBUG_MODEL_KEYS) {
+        if (typeof value[key] === 'string' && value[key].trim()) {
+            return value[key].trim().replace(/[\r\n]+/g, ' ').slice(0, 160);
+        }
+    }
+    for (const key of DEBUG_MODEL_CONTAINERS) {
+        const found = findDebugModelName(value[key], depth + 1);
+        if (found) return found;
+    }
+    return '';
+}
+
+function resolveConfiguredModelLabel(settings, stContext) {
+    if (settings.profile) {
+        const profiles = stContext?.extensionSettings?.connectionManager?.profiles || [];
+        const selected = profiles.find(profile => String(profile?.id) === String(settings.profile));
+        const model = findDebugModelName(selected);
+        const profileName = typeof selected?.name === 'string'
+            ? selected.name.trim().replace(/[\r\n]+/g, ' ').slice(0, 120)
+            : '';
+        if (model && profileName && model !== profileName) return `${model} · ${profileName}`;
+        if (model) return model;
+        if (profileName) return `${profileName} (프로필)`;
+        return '프로필 (모델 정보 없음)';
+    }
+    const directModel = String(settings.directModel || '모델 정보 없음');
+    return directModel.startsWith('vertex-') ? directModel.slice(7) : directModel;
+}
 
 function hashScopeValue(value) {
     let hash = 0x811c9dc5;
@@ -461,6 +558,15 @@ export function buildTranslationCacheScope(stContext, contextMessages = []) {
 // 🚨 v1.2.0 (관측 카운터): "잘 됐는지"를 알람·제보가 아니라 숫자로 확인하기 위한
 // 세션 누계. 유령 복사 헤더에 요약 한 줄로 노출된다. 새로고침 시 초기화(세션 단위).
 const _catStats = {
+    requests: 0,
+    apiCalls: 0,
+    validationRetries: 0,
+    transportRetries: 0,
+    cacheHits: 0,
+    bilingualAssemblies: 0,
+    glossaryEnforcements: 0,
+    skipped: 0,
+    // started는 외부 호환용 별칭이며 requests와 같은 값으로 유지한다.
     started: 0,
     success: 0,
     partialBilingual: 0,
@@ -468,7 +574,12 @@ const _catStats = {
     hardFail: 0,
     aborted: 0
 };
-export function getTranslationStats() { return { ..._catStats }; }
+export function getTranslationStats() {
+    return {
+        ..._catStats,
+        retries: _catStats.validationRetries + _catStats.transportRetries
+    };
+}
 
 // 병기 완성률은 결과를 막는 게이트가 아니라 세션 통계용 분류다.
 // 90% 이상은 경미한 흠집으로 보고 정상, 70~89%는 부분 병기,
@@ -485,26 +596,57 @@ export function classifyBilingualCompletion(repaired, total) {
     return { outcome, ratio, repaired: safeRepaired, total: safeTotal };
 }
 
-export async function fetchTranslation(text, settings, stContext, options = {}) {
-    _catStats.started++;
-    // 🚨 v1.1.7 (M-2b): 문맥 화자 이름 목록 — 문미 호격 '관측' 스탬프용.
-    // speaker가 "Baron, Archie, Lars"처럼 묶여 오는 경우 쉼표로 분해한다.
-    const _contextSpeakerNames = Array.from(new Set(
-        (options.contextMessages || [])
-            .map(m => (m && m.speaker) ? String(m.speaker) : '')
-            .flatMap(s => s.split(','))
-            .map(s => s.trim())
-            .filter(s => s.length >= 2)
-    ));
-    const isVertexModel = settings.directModel && settings.directModel.startsWith('vertex-');
-    const apiKey = settings.customKey || secret_state[SECRET_KEYS.MAKERSUITE];
-    const vertexKey = settings.vertexKey || '';
-    
-    if (!settings.profile && !apiKey && !(isVertexModel && vertexKey)) {
-        catNotify(`🚨 API 키가 없습니다! 확장 설정에서 API Key를 먼저 입력해 주세요.`, "error");
-        return null;
+function applyMatchedGlossaryToNatural(text, sourceText, dictionary, isToEnglish, preserveKoreanQuotes) {
+    let working = String(text || '');
+    const preserved = [];
+
+    if (preserveKoreanQuotes) {
+        const sourceSlots = collectQuotedSegmentsOutsideFences(sourceText);
+        const outputSlots = collectQuotedSegmentsOutsideFences(working);
+        if (sourceSlots.length === outputSlots.length) {
+            const replacements = [];
+            for (let i = 0; i < sourceSlots.length; i++) {
+                if (!isKoreanPassThroughDialogue(sourceSlots[i].content)) continue;
+                const candidate = outputSlots[i];
+                const [candidateOpen, candidateClose] = getDialogueDelimiters(candidate.type);
+                const [sourceOpen, sourceClose] = getDialogueDelimiters(sourceSlots[i].type);
+                const marker = `\uE000CAT_GLOSSARY_KEEP_${preserved.length}\uE001`;
+                preserved.push({
+                    marker,
+                    value: `${sourceOpen}${sourceSlots[i].content}${sourceClose}`
+                });
+                replacements.push({
+                    index: candidate.index,
+                    length: candidateOpen.length + candidate.content.length + candidateClose.length,
+                    marker
+                });
+            }
+            replacements.sort((a, b) => b.index - a.index);
+            for (const replacement of replacements) {
+                working = working.slice(0, replacement.index) + replacement.marker +
+                    working.slice(replacement.index + replacement.length);
+            }
+        } else {
+            // 슬롯이 이미 어긋난 경우에도 원문 그대로 남아 있는 한국어 대사는 보호한다.
+            for (const sourceSlot of sourceSlots.filter(slot => isKoreanPassThroughDialogue(slot.content))) {
+                const [open, close] = getDialogueDelimiters(sourceSlot.type);
+                const exactQuote = `${open}${sourceSlot.content}${close}`;
+                const index = working.indexOf(exactQuote);
+                if (index === -1) continue;
+                const marker = `\uE000CAT_GLOSSARY_KEEP_${preserved.length}\uE001`;
+                preserved.push({ marker, value: exactQuote });
+                working = working.slice(0, index) + marker + working.slice(index + exactQuote.length);
+            }
+        }
     }
 
+    const applied = applyPreReplaceWithCount(working, dictionary, isToEnglish);
+    let swapped = applied.swapped;
+    for (const item of preserved) swapped = swapped.split(item.marker).join(item.value);
+    return { swapped, matchCount: applied.matchCount };
+}
+
+export async function fetchTranslation(text, settings, stContext, options = {}) {
     const {
         forceLang = null,
         prevTranslation = null,
@@ -518,6 +660,29 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         retryReason = null
     } = options;
     if (!text || text.trim() === "") return null;
+    if (_qualityRetry === 0) {
+        _catStats.requests++;
+        _catStats.started++;
+    }
+    // 🚨 v1.1.7 (M-2b): 문맥 화자 이름 목록 — 문미 호격 '관측' 스탬프용.
+    // speaker가 "Baron, Archie, Lars"처럼 묶여 오는 경우 쉼표로 분해한다.
+    const _contextSpeakerNames = Array.from(new Set(
+        (options.contextMessages || [])
+            .map(m => (m && m.speaker) ? String(m.speaker) : '')
+            .flatMap(s => s.split(','))
+            .map(s => s.trim())
+            .filter(s => s.length >= 2)
+    ));
+    const isVertexModel = settings.directModel && settings.directModel.startsWith('vertex-');
+    const apiKey = settings.customKey || secret_state[SECRET_KEYS.MAKERSUITE];
+    const vertexKey = settings.vertexKey || '';
+    setDebugSecretValues([settings.customKey, settings.vertexKey, apiKey, vertexKey]);
+    
+    if (!settings.profile && !apiKey && !(isVertexModel && vertexKey)) {
+        _catStats.hardFail++;
+        catNotify(`🚨 API 키가 없습니다! 확장 설정에서 API Key를 먼저 입력해 주세요.`, "error");
+        return null;
+    }
 
     let targetLang; let isToEnglish;
     if (forceLang) {
@@ -550,7 +715,14 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
             // 🚨 beta.9.2(로그): 이 조기 종료는 _lastDebugLog 초기화보다 앞이라
             // 디버그 로그에 흔적이 안 남았음("조용히 꺼짐"의 정체). 생략 사유를 스탬프.
-            _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '생략(같은 언어)', model: '', prompt: '', rawResponse: '', cleaned: '', error: `같은 언어 판정으로 번역 생략 (원문=목표=${targetLang}) — API 호출 없음`, thought: null, recovery: null };
+            _catStats.skipped++;
+            _lastDebugLog = {
+                ...EMPTY_DEBUG_LOG(),
+                timestamp: new Date().toLocaleTimeString(),
+                mode: '생략(같은 언어)',
+                model: resolveConfiguredModelLabel(settings, stContext),
+                error: `같은 언어 판정으로 번역 생략 (원문=목표=${targetLang}) — API 호출 없음`
+            };
             return null;
         }
     }
@@ -576,6 +748,17 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             const cachedQualityInvalid = cachedQuality.score < 75 ||
                 cachedQuality.issues.some(issue => issue.startsWith('사전어 누락'));
             if (!literalMissing && cachedStructure.ok && cachedValidation.ok && !cachedQualityInvalid) {
+                _catStats.cacheHits++;
+                _catStats.success++;
+                _lastDebugLog = {
+                    ...EMPTY_DEBUG_LOG(),
+                    timestamp: new Date().toLocaleTimeString(),
+                    mode: '캐시',
+                    model: resolveConfiguredModelLabel(settings, stContext),
+                    cleaned: cachedCombined,
+                    error: null,
+                    notes: '검증된 캐시 결과 사용 — API 호출 없음'
+                };
                 if (!silent) catNotify(`${getCompletionEmoji()} 캐시 히트! ~${Math.round(text.length * 0.5)} 토큰 절약`, "success");
                 return {
                     text: cachedNatural,
@@ -620,15 +803,22 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             hasStructure: false
         }
         : protectTranslationStructure(sourceText, { dialogueRanges });
+    const matchedDictionaryLines = getMatchedDictionaryLines(
+        sourceText,
+        settings.dictionary,
+        isToEnglish
+    );
+    const matchedDictionary = matchedDictionaryLines.join('\n');
     // 🚨 beta.8: 대사 병기 모드에선 사전 선치환 스킵
     // 선치환은 원문 자체를 바꾸므로, 병기의 "원문 유지" 라인에 한글 이름이 박혀
-    // 영어 라인·한국어 파트 양쪽에 한글이 이중 노출됨 → 병기 시 사전은 프롬프트 지시로만 전달
+    // 영어 라인·한국어 파트 양쪽에 한글이 이중 노출됨 → 병기 시 원문은 그대로 두고
+    // 프롬프트 지시 + 번역 페이로드 후적용으로 한국어 쪽에만 사전을 반영한다.
     const skipPreReplace = dialogueBilingualOn && !isToEnglish;
     const { swapped: preSwapped, matchCount: dictMatchCount } = skipPreReplace
         ? { swapped: structureProtection.text, matchCount: 0 }
-        : applyPreReplaceWithCount(structureProtection.text, settings.dictionary, isToEnglish);
-    if (skipPreReplace && settings.dictionary && settings.dictionary.trim()) {
-        console.log('[CAT] 📖 대사 병기 모드 → 사전 선치환 스킵 (프롬프트 GLOSSARY로만 적용)');
+        : applyPreReplaceWithCount(structureProtection.text, matchedDictionary, isToEnglish);
+    if (skipPreReplace && matchedDictionary) {
+        console.log('[CAT] 📖 대사 병기 모드 → 원문 선치환 생략, 번역 페이로드에 사전 후적용');
     }
     if (dictMatchCount > 0) {
         console.log(`[CAT] 📖 사전 pre-replace: ${dictMatchCount}개 치환 완료`);
@@ -654,13 +844,25 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         hasContext: contextMessages.length > 0
     });
 
-    const acceptTranslation = async (acceptedOutput, acceptedThought = null, outcome = 'success') => {
+    let assemblyApplied = false;
+    let glossaryEnforcedCount = 0;
+    const acceptTranslation = async (acceptedOutput, acceptedThought = null, outcome = 'success', acceptedMeta = null) => {
         // 한 번의 번역은 정상·부분병기·병기미달 중 정확히 하나에만 집계한다.
         // 부분병기를 success에도 더하던 이전 이중 집계는 금지한다.
         const terminalCounter = outcome === 'partialBilingual' || outcome === 'bilingualBelowTarget'
             ? outcome
             : 'success';
         _catStats[terminalCounter]++;
+        const finalAssemblyApplied = acceptedMeta?.assemblyApplied ?? assemblyApplied;
+        const finalGlossaryCount = acceptedMeta?.glossaryEnforcedCount ?? glossaryEnforcedCount;
+        if (finalAssemblyApplied) {
+            _catStats.bilingualAssemblies++;
+            _lastDebugLog.assembly = '병기 자동 조립 — 영어 원문 결합 완료';
+        }
+        if (finalGlossaryCount > 0) {
+            _catStats.glossaryEnforcements += finalGlossaryCount;
+            _lastDebugLog.glossary = `사전 결과 보정 — ${finalGlossaryCount}개 적용`;
+        }
         // 🚨 beta.9.1(로그): 성공 확정 시 이전 시도의 에러 스탬프 제거 — '중단됨'인데 성공 표시되던 혼동 해소
         _lastDebugLog.error = null;
         const accepted = splitLiteralAppendix(acceptedOutput);
@@ -695,9 +897,14 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     // 🚨 beta.5: 구분선 소프트 허용 등 "통과했지만 알아둘 것"을 디버그 로그에 축적
     const recordSoftNote = (note) => {
         if (!note) return;
-        _lastDebugLog.recovery = _lastDebugLog.recovery
-            ? `${_lastDebugLog.recovery} / ${note}`
+        _lastDebugLog.notes = _lastDebugLog.notes
+            ? `${_lastDebugLog.notes} / ${note}`
             : note;
+    };
+
+    const recordAssembly = () => {
+        assemblyApplied = true;
+        _lastDebugLog.assembly = '병기 자동 조립 — 영어 원문 결합 완료';
     };
     
     const retryRejectedTranslation = async (reason, finalMessage = null, detail = null, salvageText = null) => {
@@ -748,6 +955,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                         ? `[CAT] 🔁 구조 토큰 비호환 → 구버전 방식으로 1회 재시도: ${reason}`
                         : `[CAT] 🔁 응답 검증 실패 → 1회 재시도: ${reason}`
             );
+            _catStats.validationRetries++;
             return fetchTranslation(text, settings, stContext, {
                 ...options,
                 forceFresh: true,
@@ -761,7 +969,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             console.warn('[CAT] ↩️ 재시도 전 형식 정상 결과를 대신 적용');
             _lastDebugLog.cleaned = _softCandidate.cleaned;
             _lastDebugLog.quality = _softCandidate.quality;
-            return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought);
+            return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought, 'success', _softCandidate);
         }
         // 병기 구조가 끝내 완벽하지 않아도 요청 모드를 버리지 않는다.
         // 실패 사유가 병기 검사 자체가 아니더라도 병기 요청이었다면 복원 가능한
@@ -791,6 +999,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 recordSoftNote(
                     `${recoveryLabel} (${completion.repaired}/${completion.total}, ${completionPercent}%)`
                 );
+                if (partialRepair.repaired > 0) recordAssembly();
                 _lastDebugLog.cleaned = partialText;
                 return acceptTranslation(partialText, null, completion.outcome);
             }
@@ -826,7 +1035,14 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
     // 다른 메시지의 이력이 섞여 들어옴 (2:13 로그에서 실제 오염 관측)
     const currentRunKey = hashScopeValue(text);
     const inheritedAttempts = (retryReason && _lastDebugLog.runKey === currentRunKey && Array.isArray(_lastDebugLog.attempts)) ? _lastDebugLog.attempts : [];
-    _lastDebugLog = { timestamp: new Date().toLocaleTimeString(), mode: '', model: '', prompt: '', rawResponse: '', cleaned: '', error: '(요청 진행 중 — 응답 대기. 이 문구가 계속 보이면 API/프록시가 응답을 안 준 것)', thought: null, recovery: null, validationDetail: null, attempts: inheritedAttempts, runKey: currentRunKey };
+    _lastDebugLog = {
+        ...EMPTY_DEBUG_LOG(),
+        timestamp: new Date().toLocaleTimeString(),
+        error: '(요청 진행 중 — 응답 대기. 이 문구가 계속 보이면 API/프록시가 응답을 안 준 것)',
+        validationDetail: null,
+        attempts: inheritedAttempts,
+        runKey: currentRunKey
+    };
         
         if (settings.profile && stContext.ConnectionManagerRequestService) {
             // 🚨 프로필 모드: systemInstruction 미지원 → 유저 메시지에 합침
@@ -841,7 +1057,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             }
             
             _lastDebugLog.mode = '프로필';
-            _lastDebugLog.model = '비공개';
+            _lastDebugLog.model = resolveConfiguredModelLabel(settings, stContext);
             _lastDebugLog.prompt = fullPrompt;
             
             // 🚨 프로필 모드 빈 응답 재시도 (Gemini 3.5/3.0 Flash thinking 대응)
@@ -864,6 +1080,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                         console.log(`[CAT] 🪙 토큰 증량: ${attemptMaxTokens} (thinking 모델 대응)`);
                     }
                     
+                    if (attempt > 0) _catStats.transportRetries++;
+                    _catStats.apiCalls++;
                     const response = await stContext.ConnectionManagerRequestService.sendRequest(settings.profile, [{ role: "user", content: fullPrompt }], attemptMaxTokens);
                     // 🚨 beta.9: 프로필 요청은 도중 취소가 불가 → 도착한 결과를 폐기하는 방식으로 중단 처리
                     if (abortSignal?.aborted) { console.log('[CAT] 🔴 번역 중단됨 (프로필 모드, 결과 폐기)'); _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)'; _catStats.aborted++; return null; }
@@ -872,6 +1090,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                     if (typeof response === 'string') {
                         result = response;
                     } else if (response) {
+                        const responseModel = findDebugModelName(response);
+                        if (responseModel) _lastDebugLog.model = responseModel;
                         // 우선순위 1: content (가장 일반적)
                         result = response.content || '';
                         
@@ -924,14 +1144,17 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                             : (profileErr.response ? JSON.stringify(profileErr.response).substring(0, 500) : null),
                         cause: profileErr.cause ? String(profileErr.cause).substring(0, 200) : null
                     };
-                    console.error('[CAT] 프로필 모드 에러 상세:', errorDetails);
+                    const safeErrorDetails = sanitizeDebugValue(errorDetails);
+                    console.error('[CAT] 프로필 모드 에러 상세:', safeErrorDetails);
                     
                     // 디버그 로그에 풀 상세 저장
-                    const detailsStr = Object.entries(errorDetails)
+                    const detailsStr = Object.entries(safeErrorDetails)
                         .filter(([k, v]) => v !== null && v !== '')
                         .map(([k, v]) => `${k}=${v}`)
                         .join(' | ');
-                    _lastDebugLog.error = `${profileErr.message || 'API request failed'}\n[상세] ${detailsStr || '추가 정보 없음'}`;
+                    _lastDebugLog.error = sanitizeDebugText(
+                        `${profileErr.message || 'API request failed'}\n[상세] ${detailsStr || '추가 정보 없음'}`
+                    );
                     
                     // 🚨 검사 대상 텍스트: message + status + 모든 속성 합쳐서
                     const statusCode = errorDetails.status || errorDetails.statusCode || null;
@@ -950,7 +1173,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                     
                     // 5xx, timeout, 빈 응답 등은 재시도
                     if (attempt < MAX_PROFILE_RETRIES - 1) {
-                        console.warn(`[CAT] 🔁 ${(profileErr.message || '').substring(0, 50)} → 재시도 ${attempt + 1}/${MAX_PROFILE_RETRIES}`);
+                        console.warn(`[CAT] 🔁 ${sanitizeDebugText(profileErr.message || '').substring(0, 50)} → 재시도 ${attempt + 1}/${MAX_PROFILE_RETRIES}`);
                         await sleep(1500 + attempt * 1000 + Math.random() * 1500);
                         continue;
                     }
@@ -988,7 +1211,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 
                 // 🚨 기본 (분류 안 됨): API request failed 같은 generic 에러
                 // 3.5 Flash 사용자는 거의 99% 리저닝 문제이므로 그것부터 안내
-                throw new Error(`❌ [API 호출 실패] 가장 흔한 원인:\n🔧 ST 설정 → AI Response Config → Reasoning Effort를 'Minimum'으로 변경!\n(3.5 Flash는 Low조차 자주 실패해요. Minimum 권장)\n원본: ${(lastProfileErr.message || '').substring(0, 100)}`);
+                throw new Error(`❌ [API 호출 실패] 가장 흔한 원인:\n🔧 ST 설정 → AI Response Config → Reasoning Effort를 'Minimum'으로 변경!\n(3.5 Flash는 Low조차 자주 실패해요. Minimum 권장)\n원본: ${sanitizeDebugText(lastProfileErr.message || '').substring(0, 100)}`);
             }
         } else {
             // Vertex 모델 분기
@@ -1044,7 +1267,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             
             const fetchBody = { systemInstruction: { parts: [{ text: activeSystemInstruction }] }, contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig, safetySettings: SAFETY_SETTINGS };
             _lastDebugLog.mode = '직접 연결';
-            _lastDebugLog.model = '비공개';
+            _lastDebugLog.model = actualModel || resolveConfiguredModelLabel(settings, stContext);
             _lastDebugLog.prompt = prompt;
             console.log(`[CAT] 🧠 Direct 모드: systemInstruction 분리 | 모델: ${actualModel} | temp: ${temperature} | maxTokens: ${maxTokens}`);
             
@@ -1061,6 +1284,38 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         }
 
         let cleaned = cleanResult(result, text, structureProtection);
+
+        // 모델이 프롬프트의 사전을 무시해도 현재 원문에서 실제로 매칭된 항목은
+        // 번역 페이로드에 결정론적으로 적용한다. 병기 원문은 이후 sourceText에서
+        // 다시 결합되므로 영어 원문 표기는 보존된다. 직역 부록의 » 원문 줄도 제외한다.
+        if (cleaned && matchedDictionary) {
+            const glossarySplit = splitLiteralAppendix(cleaned);
+            const naturalGlossary = applyMatchedGlossaryToNatural(
+                glossarySplit.natural,
+                sourceText,
+                matchedDictionary,
+                isToEnglish,
+                dialogueBilingualOn && !isToEnglish
+            );
+            let literalText = glossarySplit.literal;
+            let literalMatchCount = 0;
+            if (literalText) {
+                literalText = literalText.split('\n').map(line => {
+                    if (/^\s*»\s/.test(line)) return line;
+                    const applied = applyPreReplaceWithCount(line, matchedDictionary, isToEnglish);
+                    literalMatchCount += applied.matchCount;
+                    return applied.swapped;
+                }).join('\n');
+            }
+            glossaryEnforcedCount += naturalGlossary.matchCount + literalMatchCount;
+            cleaned = literalText
+                ? `${naturalGlossary.swapped}\n<<<CAT_LITERAL>>>\n${literalText}`
+                : naturalGlossary.swapped;
+            if (glossaryEnforcedCount > 0) {
+                _lastDebugLog.glossary = `사전 결과 보정 — ${glossaryEnforcedCount}개 적용`;
+                console.log(`[CAT] 📖 사전 결과 보정: ${glossaryEnforcedCount}개 강제 적용`);
+            }
+        }
         
         // 🚨 v1.1.1: 모델 장식 펜스 회수 — 원문에 \`\`\`가 0개인데 응답에 있으면
         // 그 펜스는 100% 모델이 멋대로 감싼 장식 (인풋 번역에서 특히 빈발)
@@ -1195,7 +1450,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
                 cleaned = splitForRepair.literal
                     ? `${repairedNatural}\n<<<CAT_LITERAL>>>\n${splitForRepair.literal}`
                     : repairedNatural;
-                recordSoftNote('병기 자동 조립 — 누락된 영어 원문 복원');
+                recordAssembly();
             }
         }
 
@@ -1210,8 +1465,9 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             const qualityReason = quality.issues.join('; ');
             console.warn(`[CAT] 🔁 품질 보강 재시도: ${qualityReason}`);
             const fallbackCandidate = quality.score >= 70
-                ? { cleaned, thought, quality }
+                ? { cleaned, thought, quality, assemblyApplied, glossaryEnforcedCount }
                 : null;
+            _catStats.validationRetries++;
             return fetchTranslation(text, settings, stContext, {
                 ...options,
                 forceFresh: true,
@@ -1228,6 +1484,8 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
             cleaned = _softCandidate.cleaned;
             thought = _softCandidate.thought;
             quality = _softCandidate.quality;
+            assemblyApplied = Boolean(_softCandidate.assemblyApplied);
+            glossaryEnforcedCount = Number(_softCandidate.glossaryEnforcedCount) || 0;
         }
         if (quality.issues.length > 0) {
             console.warn(`[CAT] 🧪 품질 점수 ${quality.score}: ${quality.issues.join('; ')}`);
@@ -1237,6 +1495,7 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         _lastDebugLog.cleaned = cleaned;
         if (!cleaned || cleaned.trim().length === 0) { 
             _lastDebugLog.error = '번역 결과 비어있음 (AI 거부 또는 오류)';
+            _catStats.hardFail++;
             // 원본에 거부 패턴이 있었으면 더 구체적으로 안내
             if (result && /검색을 수행해야|cannot perform|cannot provide|작업을 수행할 수 없|사용자 사양을 준수/i.test(result)) {
                 catNotify(`${getThemeEmoji()} AI가 번역을 거부했어요. 다시 시도해주세요.`, "warning");
@@ -1352,15 +1611,20 @@ export async function fetchTranslation(text, settings, stContext, options = {}) 
         }
         return acceptTranslation(cleaned, thought);
     } catch (e) {
-        if (e.name === 'AbortError') return null;
+        if (e.name === 'AbortError' || abortSignal?.aborted || e.message === '취소됨') {
+            _lastDebugLog.error = '중단됨 (사용자 중단 또는 새 번역 시작)';
+            _catStats.aborted++;
+            return null;
+        }
         if (_softCandidate?.cleaned) {
-            console.warn(`[CAT] ↩️ 품질 재시도 호출 실패 → 첫 결과 적용: ${e.message || e}`);
+            console.warn(`[CAT] ↩️ 품질 재시도 호출 실패 → 첫 결과 적용: ${sanitizeDebugText(e.message || e)}`);
             _lastDebugLog.cleaned = _softCandidate.cleaned;
             _lastDebugLog.quality = _softCandidate.quality;
-            return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought);
+            return acceptTranslation(_softCandidate.cleaned, _softCandidate.thought, 'success', _softCandidate);
         }
-        const errMsg = e.message || '알 수 없는 오류';
+        const errMsg = sanitizeDebugText(e.message || '알 수 없는 오류');
         _lastDebugLog.error = errMsg;
+        _catStats.hardFail++;
         
         // 🚨 네트워크/시스템 오류 분류 - 어디서 맛탱이 갔는지 명확히
         const networkErrorMsg = classifyNetworkError(e);
@@ -2253,7 +2517,12 @@ function assessTranslationQuality(output, originalText, settings, targetLang) {
     }
 
     const missingGlossary = [];
-    for (const line of String(settings.dictionary || '').split('\n')) {
+    const sourceGlossaryLines = getMatchedDictionaryLines(
+        source,
+        settings.dictionary,
+        targetLang === 'English'
+    );
+    for (const line of sourceGlossaryLines) {
         if (!line.includes('=')) continue;
         const [left, ...rightParts] = line.split('=');
         const right = rightParts.join('=');
@@ -2280,8 +2549,7 @@ function assessTranslationQuality(output, originalText, settings, targetLang) {
         } else {
             outputTermFound = naturalLower.includes(outputTermLower);
         }
-        if (source.toLocaleLowerCase().includes(sourceTerm.toLocaleLowerCase()) &&
-            !outputTermFound) {
+        if (!outputTermFound) {
             missingGlossary.push(outputTerm);
         }
     }
@@ -2643,17 +2911,15 @@ Just plain, fully-translated text.
         // 원문에 있는지로 매칭하고, SOURCE=TARGET 의미가 유지되도록 항목을 뒤집어 제시.
         // 기존엔 항상 좌변만 검사해 입력 번역에서 사전 프롬프트가 누락됐음.
         const toEnglish = targetLang === 'English';
-        const textLower = String(sourceText || text).toLowerCase();
-        const matchedLines = settings.dictionary.split('\n').map(l => {
-            if (!l.includes('=')) return null;
-            const [left, ...rightParts] = l.split('=');
-            const right = rightParts.join('=').trim();
-            const leftTrim = left.trim();
-            if (!leftTrim || !right) return null;
-            const sourceSide = toEnglish ? right : leftTrim;
-            if (!textLower.includes(sourceSide.toLowerCase())) return null;
-            return toEnglish ? `${right}=${leftTrim}` : `${leftTrim}=${right}`;
-        }).filter(Boolean);
+        const matchedLines = getMatchedDictionaryLines(
+            sourceText || text,
+            settings.dictionary,
+            toEnglish
+        ).map(line => {
+            if (!toEnglish) return line;
+            const [left, ...rightParts] = line.split('=');
+            return `${rightParts.join('=').trim()}=${left.trim()}`;
+        });
         if (matchedLines.length > 0) {
             const targetLangName = targetLang || 'the target language';
             parts.push(`
@@ -2826,6 +3092,8 @@ async function fetchWithRetry(url, body, retries = 5, abortSignal = null, extraH
                 signal
             };
             
+            if (attempt > 0) _catStats.transportRetries++;
+            _catStats.apiCalls++;
             const res = await fetch(url, fetchOptions);
             clearTimeout(timeoutId);
             
@@ -2882,7 +3150,7 @@ async function fetchWithRetry(url, body, retries = 5, abortSignal = null, extraH
             if (attempt >= retries) throw e;
             
             // 네트워크 오류 등 일반 에러 재시도
-            console.warn(`[CAT] 🔁 ${e.message?.substring(0, 50) || '오류'} → 재시도 ${attempt + 1}/${retries}`);
+            console.warn(`[CAT] 🔁 ${sanitizeDebugText(e.message || '').substring(0, 50) || '오류'} → 재시도 ${attempt + 1}/${retries}`);
             await sleep(calculateBackoff(attempt, 1000, 15000));
         }
     }

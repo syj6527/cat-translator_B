@@ -1,8 +1,8 @@
 {
     "name": "cat-translator-lab",
     "display_name": "🐱🔬 Cat Translator Lab",
-    "version": "1.2.0-lab.9",
-    "description": "🔬 비공개 실험 채널 — 혼합 언어 대사 슬롯 정렬",
+    "version": "1.2.0-lab.10",
+    "description": "🔬 실험실 채널 — 사전 강제 적용·안전한 진단 로그",
     "author": "냥헴 & GPT & Claude",
     "js": "index.js",
     "css": "style.css"

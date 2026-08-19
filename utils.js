@@ -93,7 +93,8 @@ export function catNotifyProgress(message, onAbort) {
 }
 
 // 🚨 정밀 클리너: AI가 추가한 래핑만 제거, 원본 코드블록/YAML 보존!
-export const CAT_BETA_VERSION = '1.2.0-lab.9';
+export const CAT_BETA_VERSION = '1.2.0-lab.10';
+export const CAT_BUILD_CHANNEL = 'lab';
 
 export function cleanResult(text, originalText = null, structureProtection = null) {
     if (!text) return "";
@@ -1583,28 +1584,57 @@ export function detectLanguageDirection(text, settings) {
     return { isToEnglish: false, targetLang: settings.targetLang };
 }
 
+function parseDictionaryLine(line, isToEnglish = false) {
+    if (!String(line || '').includes('=')) return null;
+    const [left, ...rightParts] = String(line).split('=');
+    const orig = left.trim();
+    const trans = rightParts.join('=').trim();
+    if (!orig || !trans) return null;
+    return {
+        originalLine: `${orig}=${trans}`,
+        source: isToEnglish ? trans : orig,
+        target: isToEnglish ? orig : trans
+    };
+}
+
+function dictionaryTermRegex(term, flags = 'gi') {
+    const escaped = String(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // 영문 단어는 경계를 적용해 Ghost가 Ghostbusters 안에서 잡히지 않게 한다.
+    const isLatinWord = /^[a-zA-Z]/.test(term) && /[a-zA-Z]$/.test(term);
+    return new RegExp(isLatinWord ? `\\b${escaped}\\b` : escaped, flags);
+}
+
+// 현재 원문에 실제 등장한 항목만 반환한다. 프롬프트 필터·결과 강제 적용·품질 검사가
+// 같은 경계 규칙을 공유해 includes() 계열의 부분 문자열 오탐이 다시 생기지 않게 한다.
+export function getMatchedDictionaryLines(text, dictionary, isToEnglish = false) {
+    if (!dictionary || !String(dictionary).trim()) return [];
+    const source = String(text || '');
+    return String(dictionary)
+        .split('\n')
+        .map(line => parseDictionaryLine(line, isToEnglish))
+        .filter(Boolean)
+        .filter(entry => dictionaryTermRegex(entry.source, 'i').test(source))
+        .sort((a, b) => b.source.length - a.source.length)
+        .map(entry => entry.originalLine);
+}
+
 export function applyPreReplace(text, dictionary, isToEnglish) { return applyPreReplaceWithCount(text, dictionary, isToEnglish).swapped; }
 export function applyPreReplaceWithCount(text, dictionary, isToEnglish) {
-    if (!dictionary || dictionary.trim() === "") return { swapped: text, matchCount: 0 };
-    const lines = dictionary.split('\n').filter(l => l.includes('='));
-    if (lines.length === 0) return { swapped: text, matchCount: 0 };
+    if (!dictionary || String(dictionary).trim() === "") return { swapped: text, matchCount: 0 };
+    const entries = String(dictionary)
+        .split('\n')
+        .map(line => parseDictionaryLine(line, isToEnglish))
+        .filter(Boolean)
+        .sort((a, b) => b.source.length - a.source.length);
+    if (entries.length === 0) return { swapped: text, matchCount: 0 };
 
     let result = text; let matchCount = 0;
-    lines.sort((a, b) => b.split('=')[0].length - a.split('=')[0].length);
-
-    lines.forEach(line => {
-        const parts = line.split('=');
-        if (parts.length >= 2) {
-            const orig = parts[0].trim(); const trans = parts.slice(1).join('=').trim();
-            const searchStr = isToEnglish ? trans : orig; const replaceStr = isToEnglish ? orig : trans;
-            if (searchStr && replaceStr) {
-                const escaped = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                // 🚨 영문 단어는 word boundary 적용 (bro가 broken 안에서 매칭되는 것 방지)
-                const isLatinWord = /^[a-zA-Z]/.test(searchStr) && /[a-zA-Z]$/.test(searchStr);
-                const pattern = isLatinWord ? `\\b${escaped}\\b` : escaped;
-                const regex = new RegExp(pattern, 'gi'); const matches = result.match(regex);
-                if (matches) { matchCount += matches.length; result = result.replace(regex, replaceStr); }
-            }
+    entries.forEach(({ source, target }) => {
+        const regex = dictionaryTermRegex(source, 'gi');
+        const matches = String(result).match(regex);
+        if (matches) {
+            matchCount += matches.length;
+            result = String(result).replace(regex, target);
         }
     });
     return { swapped: result, matchCount };
